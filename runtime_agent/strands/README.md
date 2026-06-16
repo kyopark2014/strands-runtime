@@ -27,6 +27,7 @@ flowchart TB
     AC["AgentCore Runtime (SSE)"]
   end
 
+
   subgraph Runtime["runtime_agent/strands"]
     ENTRY["agent.py · agent_strands"]
     SA["strands_agent.py"]
