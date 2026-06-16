@@ -1,12 +1,12 @@
-# LangGraph Agent의 AgentCore 배포 및 활용
+# Strands Agent의 AgentCore 배포 및 활용
 
-여기에서는 AgentCore Runtime을 이용해서 1) LangGraph, Strands SDK, Claude Agent SDK를 이용해 만든 agent를 배포하는 방법과 2) agent에 필요한 데이터를 수집하고 사용자의 의도에 따른 동작을 수행하는 방법을 설명합니다. AgentCore는 Agent와 MCP를 위한 서버리스 production 환경으로서 Agent와 MCP 서버를 편리하게 배포하고 안전하고 효과적으로 운용할 수 있습니다.
+여기에서는 AgentCore Runtime을 이용해서 Strands Agent를 AgentCore Runtime에 배포하는 방법과 2) agent에 필요한 데이터를 수집하고 사용자의 의도에 따른 동작을 수행하는 방법을 설명합니다. AgentCore는 Agent와 MCP를 위한 서버리스 production 환경으로서 Agent와 MCP 서버를 편리하게 배포하고 안전하고 효과적으로 운용할 수 있습니다.
 
 ## 주요 구현 
 
 ### 전체 Architecture
 
-전체적인 Architecture는 아래와 같습니다. 여기서는 MCP를 지원하는 Strands와 LangGraph agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)를 이용해 배포하고 streamlit 애플리케이션을 이용해 사용합니다. 개발자는 각 agent에 맞는 [Dockerfile](./runtime/langgraph/Dockerfile)을 이용하여, docker image를 생성하고 ECR에 업로드 합니다. 이후 [bedrock-agentcore-control](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/Welcome.html)의 [create_agent_runtime.py](./runtime/langgraph/create_agent_runtime.py)을 이용해서 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)의 runtime으로 배포합니다. 이 작업이 끝나면 EC2와 같은 compute에 있는 streamlit에서 LangGraph와 Strands agent를 활용할 수 있습니다. 애플리케이션에서 AgentCore의 runtime을 호출할 때에는 [bedrock-agentcore](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore.html)의 [invoke_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore/client/invoke_agent_runtime.html)을 이용합니다. 이때에 각 agent를 생성할 때에 확인할 수 있는 [agentRuntimeArn](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_Agent.html)을 이용합니다. Agent는 [MCP](https://modelcontextprotocol.io/introduction)을 이용해 RAG, AWS Document, Tavily와 같은 검색 서비스를 활용할 수 있습니다. 여기에서는 RAG를 위하여 Lambda를 이용합니다. 데이터 저장소의 관리는 Knowledge base를 사용하고, 벡터 스토어로는 OpenSearch를 이용합니다. Agent에 필요한 S3, CloudFront, OpenSearch, Lambda등의 배포를 위해서는 AWS CDK를 이용합니다.
+전체적인 Architecture는 아래와 같습니다. 여기서는 MCP를 지원하는 Strands와 Strands agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)를 이용해 배포하고 streamlit 애플리케이션을 이용해 사용합니다. 개발자는 각 agent에 맞는 [Dockerfile](./runtime/Strands/Dockerfile)을 이용하여, docker image를 생성하고 ECR에 업로드 합니다. 이후 [bedrock-agentcore-control](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/Welcome.html)의 [create_agent_runtime.py](./runtime/Strands/create_agent_runtime.py)을 이용해서 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)의 runtime으로 배포합니다. 이 작업이 끝나면 EC2와 같은 compute에 있는 streamlit에서 Strands와 Strands agent를 활용할 수 있습니다. 애플리케이션에서 AgentCore의 runtime을 호출할 때에는 [bedrock-agentcore](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore.html)의 [invoke_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore/client/invoke_agent_runtime.html)을 이용합니다. 이때에 각 agent를 생성할 때에 확인할 수 있는 [agentRuntimeArn](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_Agent.html)을 이용합니다. Agent는 [MCP](https://modelcontextprotocol.io/introduction)을 이용해 RAG, AWS Document, Tavily와 같은 검색 서비스를 활용할 수 있습니다. 여기에서는 RAG를 위하여 Lambda를 이용합니다. 데이터 저장소의 관리는 Knowledge base를 사용하고, 벡터 스토어로는 OpenSearch를 이용합니다. Agent에 필요한 S3, CloudFront, OpenSearch, Lambda등의 배포를 위해서는 AWS CDK를 이용합니다.
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/297edccf-de23-40bf-8f94-99b4a3cbbca1" />
 
@@ -15,7 +15,7 @@ AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.
 
 ### Operation Architecture
 
-Streamlit UI(`application/app.py`)에서 Agent 타입·MCP·모델·플랫폼을 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`) 또는 로컬 Docker(`localhost:8080`)로 요청을 보냅니다. Runtime은 `runtime_agent/{langgraph,strands,claude}/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 MCP와 내장 도구를 연결한 뒤 Amazon Bedrock으로 추론합니다. MCP 서버(`kb-retriever`, `use-aws`)는 `runtime_mcp/`에 별도 AgentCore Runtime으로 배포됩니다.
+Streamlit UI(`application/app.py`)에서 Agent 타입·MCP·모델·플랫폼을 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`) 또는 로컬 Docker(`localhost:8080`)로 요청을 보냅니다. Runtime은 `runtime_agent/{Strands,strands,claude}/agent.py`의 `BedrockAgentCoreApp` 엔트리포인트에서 MCP와 내장 도구를 연결한 뒤 Amazon Bedrock으로 추론합니다. MCP 서버(`kb-retriever`, `use-aws`)는 `runtime_mcp/`에 별도 AgentCore Runtime으로 배포됩니다.
 
 ```mermaid
 flowchart TB
@@ -30,12 +30,12 @@ flowchart TB
   end
 
   subgraph Runtime["AgentCore Runtime / Docker"]
-    LG["langgraph/agent.py"]
+    LG["Strands/agent.py"]
     ST["strands/agent.py"]
     CL["claude/agent.py"]
   end
 
-  subgraph LangGraphStack["LangGraph Runtime (legacy)"]
+  subgraph StrandsStack["Strands Runtime (legacy)"]
     LGA[StateGraph + astream]
     LGB["Built-in: execute_code, bash, read/write_file, upload_file_to_s3"]
     LGM[MultiServerMCPClient]
@@ -126,11 +126,11 @@ flowchart TB
 | MCP (RAG) | `runtime_mcp/iam_auth/kb-retriever/` | Bedrock Knowledge Base `retrieve` 도구를 AgentCore MCP Runtime으로 제공 |
 | MCP (AWS) | `runtime_mcp/iam_auth/use-aws/` | AWS API 호출 도구를 AgentCore MCP Runtime으로 제공 |
 
-플랫폼은 **AgentCore**(서버리스 Runtime)와 **Docker**(로컬 `localhost:8080`) 중 선택할 수 있으며, Agent 타입은 **langgraph** / **strands** / **claude** 중 하나를 선택합니다. MCP는 UI에서 `kb-retriever`, `use-aws`, `aws document`, `사용자 설정`을 체크박스로 선택합니다.
+플랫폼은 **AgentCore**(서버리스 Runtime)와 **Docker**(로컬 `localhost:8080`) 중 선택할 수 있으며, Agent 타입은 **Strands** / **strands** / **claude** 중 하나를 선택합니다. MCP는 UI에서 `kb-retriever`, `use-aws`, `aws document`, `사용자 설정`을 체크박스로 선택합니다.
 
 ### AgentCore 소개
 
-- AgentCore Runtime: AI agent와 tool을 배포하고 트래픽에 따라 자동으로 확장(Scaling)이 가능한 serverless runtime입니다. LangGraph, CrewAI, Strands Agents를 포함한 다양한 오픈소스 프레임워크을 지원합니다. 빠른 cold start, 세션 격리, 내장된 신원 확인(built-in identity), multimodal payload를 지원합니다. 이를 통해 안전하고 빠른 출시가 가능합니다.
+- AgentCore Runtime: AI agent와 tool을 배포하고 트래픽에 따라 자동으로 확장(Scaling)이 가능한 serverless runtime입니다. Strands, CrewAI, Strands Agents를 포함한 다양한 오픈소스 프레임워크을 지원합니다. 빠른 cold start, 세션 격리, 내장된 신원 확인(built-in identity), multimodal payload를 지원합니다. 이를 통해 안전하고 빠른 출시가 가능합니다.
 - AgentCore Memory: Agent가 편리하게 short term, long term 메모리를 관리할 수 있습니다.
 - AgentCore Code Interpreter: 분리된 sandbox 환경에서 안전하게 코드를 실행할 수 있습니다.
 - AgentCore Broswer: 브라우저를 이용해 빠르고 안전하게 웹크롤링과 같은 작업을 수행할 수 있습니다.
@@ -168,7 +168,7 @@ response = client.create_agent_runtime(
 print(f"✓ Agent runtime created: {response['agentRuntimeArn']}")
 ```
 
-Agent에서 MCP server로 요청을 보낼때에는 아래와 같이 IAM 인증을 수행하기 위하여 request에 X-Amz-Security-Token을 포함합니다. 이를 위해 httpx의 event hook을 이용해 아래와 같이 구현할 수 있습니다. 상세코드는 [agent.py](https://github.com/kyopark2014/agent-runtime/blob/main/runtime_agent/langgraph/agent.py)을 참조합니다.
+Agent에서 MCP server로 요청을 보낼때에는 아래와 같이 IAM 인증을 수행하기 위하여 request에 X-Amz-Security-Token을 포함합니다. 이를 위해 httpx의 event hook을 이용해 아래와 같이 구현할 수 있습니다. 상세코드는 [agent.py](https://github.com/kyopark2014/agent-runtime/blob/main/runtime_agent/Strands/agent.py)을 참조합니다.
 
 ```python
 original_init = httpx.AsyncClient.__init__
@@ -260,7 +260,7 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 app = BedrockAgentCoreApp()
 
 @app.entrypoint
-async def agent_langgraph(payload):
+async def agent_Strands(payload):
     httpx.AsyncClient.__init__ = patched_init
     
     client = MultiServerMCPClient(server_params)
@@ -338,10 +338,10 @@ agent("Hello!") # This conversation is persisted
 
 ### AgentCore Runtime으로 Agent 배포하기
 
-LangGraph와 strands agent에 대한 이미지를 [Dockerfile](./runtime/langgraph/Dockerfile)을 이용해 빌드후 ECR에 배포합니다. 
+Strands와 strands agent에 대한 이미지를 [Dockerfile](./runtime/Strands/Dockerfile)을 이용해 빌드후 ECR에 배포합니다. 
 
 
-[create_agent_runtime.py](./runtime/langgraph/create_agent_runtime.py)에서는 AgentCore에 처음으로 배포하는지 확인하여 아래와 같이 runtime을 생성합니다. 여기서 networkMode는 PUBLIC/VPC를 선택할 수 있어서 필요시 agent를 특정 VPC 접속으로 제한할 수 있고, Security Group을 이용하여 사내로 접속을 제한할 수 있습니다. 또한, protocolConfiguration은 HTTP, MCP, A2A를 선택하여 필요한 용도에 맞게 사용할 수 있습니다. 인증은 기본이 IAM이며, 필요시 authorizerConfiguration을 이용해 JWT를 사용할 수 있습니다.
+[create_agent_runtime.py](./runtime/Strands/create_agent_runtime.py)에서는 AgentCore에 처음으로 배포하는지 확인하여 아래와 같이 runtime을 생성합니다. 여기서 networkMode는 PUBLIC/VPC를 선택할 수 있어서 필요시 agent를 특정 VPC 접속으로 제한할 수 있고, Security Group을 이용하여 사내로 접속을 제한할 수 있습니다. 또한, protocolConfiguration은 HTTP, MCP, A2A를 선택하여 필요한 용도에 맞게 사용할 수 있습니다. 인증은 기본이 IAM이며, 필요시 authorizerConfiguration을 이용해 JWT를 사용할 수 있습니다.
 
 ```python
 response = client.create_agent_runtime(
@@ -395,7 +395,7 @@ response = client.update_agent_runtime(
 ```
 
 
-[test_runtime_local.py](./runtime/langgraph/test_runtime_local.py)에서는 아래와 같이 prompt, MCP server, model 정보를 설정합니다. 이후 request를 POST로 전송한 후에 결과를 확인합니다. 
+[test_runtime_local.py](./runtime/Strands/test_runtime_local.py)에서는 아래와 같이 prompt, MCP server, model 정보를 설정합니다. 이후 request를 POST로 전송한 후에 결과를 확인합니다. 
 
 ```python
 prompt = "보일러 에러 코드?"
@@ -610,11 +610,11 @@ Knowledge Base에서 문서를 활용하기 위해서는 S3에 문서 등록 및
 
 AgentCore는 SSE 방식의 stream을 제공합니다. 
 
-### LangGraph
+### Strands
 
-#### LangGraph Agent
+#### Strands Agent
 
-아래는 LangGraph로 구현한 ReAct agent입니다. 
+아래는 Strands로 구현한 ReAct agent입니다. 
 
 ```python
 def buildChatAgentWithHistory(tools):
@@ -642,14 +642,14 @@ def buildChatAgentWithHistory(tools):
 ```
 
 
-[LangGraph - agent.py](./langgraph_stream/agent.py)와 같이 stream 방식으로 처리하면 agent가 좀 더 동적으로 동작하게 할 수 있습니다. 아래와 같이 MCP 서버의 정보로 json 파일을 만든 후에 MultiServerMCPClient으로 client를 설정하고 나서 agent를 생성합니다. 이후 stream을 이용해 출력할때 json 형태의 결과값을 stream으로 전달합니다. 
+[Strands - agent.py](./Strands_stream/agent.py)와 같이 stream 방식으로 처리하면 agent가 좀 더 동적으로 동작하게 할 수 있습니다. 아래와 같이 MCP 서버의 정보로 json 파일을 만든 후에 MultiServerMCPClient으로 client를 설정하고 나서 agent를 생성합니다. 이후 stream을 이용해 출력할때 json 형태의 결과값을 stream으로 전달합니다. 
 
 ```python
 from bedrock_agentcore.runtime import BedrockAgentCoreApp
 app = BedrockAgentCoreApp()
 
 @app.entrypoint
-async def agent_langgraph(payload):
+async def agent_Strands(payload):
     mcp_json = mcp_config.load_selected_config(mcp_servers)
     server_params = load_multiple_mcp_server_parameters(mcp_json)
     client = MultiServerMCPClient(server_params)
