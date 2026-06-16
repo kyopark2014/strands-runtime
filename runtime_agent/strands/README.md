@@ -8,16 +8,23 @@ Strands Agent는 AI agent 구축 및 실행을 위해 설계된 오픈소스 SDK
 
 ## Operation Architecture
 
+Streamlit UI(`application/app.py`)에서 대화 모드·Skills·MCP·Strands Tools·모델을 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 SSE 요청을 보냅니다. 로컬 개발 시에는 `run_agent_in_docker`로 `localhost:8080`의 Docker 컨테이너를 호출할 수 있습니다. Runtime은 `agent.py`의 `agent_strands` 엔트리포인트에서 Strands Agent, Agent Skills, 임베디드 MCP 서버를 연결한 뒤 Amazon Bedrock으로 추론합니다.
+
 ```mermaid
 flowchart TB
-  subgraph Client["Client"]
-    APP["application/app.py"]
-    ACC["application/agentcore_client.py"]
+  subgraph UI["Streamlit (application/app.py)"]
+    MODE["Agent / Agent (Chat)"]
+    SEL["Skills · MCP · Strands Tools · 모델"]
+  end
+
+  subgraph Client["application/agentcore_client.py"]
+    RA["run_agent · invoke_agent_runtime"]
+    RD["run_agent_in_docker · localhost:8080"]
     TEST["test_runtime_remote.py"]
   end
 
   subgraph AgentCore["Amazon Bedrock AgentCore"]
-    AC["invoke_agent_runtime (SSE)"]
+    AC["AgentCore Runtime (SSE)"]
   end
 
   subgraph Runtime["runtime_agent/strands"]
@@ -25,36 +32,47 @@ flowchart TB
     SA["strands_agent.py"]
     SK["skill.py"]
     MCP["mcp_config.py · mcp.list"]
-    CHAT["chat.py"]
+    CHAT["chat.py · get_tool_info"]
     INFO["info.py · model profiles"]
-    UTILS["utils.py · config"]
+    UTILS["utils.py · config.json"]
   end
 
   subgraph Skills["Agent Skills"]
-    SRC["skills/*/SKILL.md"]
+    SRC["skills/*/SKILL.md + references/"]
   end
 
   subgraph AgentStack["Strands Agents SDK"]
     A["Agent + BedrockModel"]
     BT["Built-in: execute_code, bash, upload_file_to_s3"]
+    GSI["get_skill_instructions"]
     ST["strands_tools: current_time, file_read, file_write"]
-    MCM[MCPClientManager]
+    MCM["MCPClientManager"]
   end
 
   subgraph MCPServers["Embedded MCP (mcp_server_*.py)"]
-    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · …"]
+    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · 사용자 설정"]
   end
 
-  subgraph Storage["Artifacts / S3"]
-    ART[artifacts/]
+  subgraph LLM["Amazon Bedrock"]
+    BR["Bedrock Runtime"]
+  end
+
+  subgraph Storage["Artifacts / S3 / CloudFront"]
+    ART["artifacts/"]
     S3[(S3)]
+    CF["sharing_url"]
   end
 
-  APP --> ACC
-  ACC -->|run_agent| AC
-  ACC -.->|run_agent_in_docker localhost:8080| ENTRY
+  MODE --> RA
+  SEL --> RA
+  MODE -.-> RD
+  SEL -.-> RD
   TEST --> AC
+
+  RA --> AC
+  RD -.-> ENTRY
   AC --> ENTRY
+
   ENTRY --> SA
   ENTRY --> CHAT
   CHAT --> INFO
@@ -64,15 +82,18 @@ flowchart TB
   SA --> A
   SA --> SK
   SK -->|build_skill_prompt| A
-  SA -->|get_skill_instructions| SK
+  A --> GSI
+  GSI --> SK
   SK --> SRC
   A --> BT
   A --> ST
   A --> MCM
+  A --> BR
   MCM -->|load_config| MCP
   MCM --> MCPsrv
   BT --> ART
   BT --> S3
+  BT --> CF
 ```
 
 | 구성 요소 | 파일 | 설명 |
