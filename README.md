@@ -395,58 +395,6 @@ response = client.update_agent_runtime(
 ```
 
 
-[test_runtime_local.py](./runtime/Strands/test_runtime_local.py)에서는 아래와 같이 prompt, MCP server, model 정보를 설정합니다. 이후 request를 POST로 전송한 후에 결과를 확인합니다. 
-
-```python
-prompt = "보일러 에러 코드?"
-mcp_servers = ["kb-retriever"]
-model_name = "Claude 3.7 Sonnet"
-user_id = uuid.uuid4().hex
-history_mode = "Disable"
-
-payload = {
-    "prompt": prompt,
-    "mcp_servers": mcp_servers,
-    "model_name": model_name,
-    "user_id": user_id,
-    "history_mode": history_mode
-}
-
-runtime_url = "http://127.0.0.1:8080/invocations"
-headers = {
-    "Content-Type": "application/json",
-    "Accept": "application/json, text/event-stream"
-}
-
-response = requests.post(runtime_url, headers=headers, json=payload, stream=True)    
-if "text/event-stream" in response.headers.get("content-type", ""):
-    for line in response.iter_lines(chunk_size=10):
-        if line:
-            line = line.decode("utf-8")
-            print(f"-> {line}")
-```
-
-또한, streamlit에서 아래와 같이 "Docker"를 선택하면, local의 docker를 테스트 할 수 있습니다.
-
-<img width="195" height="95" alt="image" src="https://github.com/user-attachments/assets/f0bc2385-30d4-4486-b002-a3ff25928802" />
-
-"Docker"를 선택하면, [agentcore_client.py](./application/agentcore_client.py)와 같이 http://localhost:8080/invocations 로 요청을 보내서 응답을 확인합니다.
-
-```python
-import requests
-payload = json.dumps({
-    "prompt": prompt,
-    "mcp_servers": mcp_servers,
-    "model_name": model_name,
-    "user_id": user_id,
-    "history_mode": history_mode
-})
-headers = {"Content-Type": "application/json"}   
-destination = f"http://localhost:8080/invocations"
-response = requests.post(destination, headers=headers, data=payload, timeout=300)
-```
-
-
 
 ## Runtime MCP 
 
