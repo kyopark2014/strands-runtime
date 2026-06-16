@@ -682,5 +682,3 @@ if __name__ == "__main__":
 [Deploy Production-Ready Agents in 22 Minutes with AgentCore Runtime](https://www.youtube.com/watch?v=Q-tYIAuv9WI)
 
 [AgentCore Workshop](https://atomoh.gitbook.io/aiops)
-
-[Deploy Production-Ready Agents in 22 Minutes with AgentCore Runtime
