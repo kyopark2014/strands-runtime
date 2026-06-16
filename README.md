@@ -523,28 +523,6 @@ if "text/event-stream" in response.get("contentType", ""):
 
 ## 배포하기
 
-### EC2로 배포하기
-
-AWS console의 EC2로 접속하여 [Launch an instance](https://us-west-2.console.aws.amazon.com/ec2/home?region=us-west-2#Instances:)를 선택합니다. [Launch instance]를 선택한 후에 적당한 Name을 입력합니다. (예: es) key pair은 "Proceed without key pair"을 선택하고 넘어갑니다. 
-
-<img width="700" alt="ec2이름입력" src="https://github.com/user-attachments/assets/c551f4f3-186d-4256-8a7e-55b1a0a71a01" />
-
-
-Instance가 준비되면 [Connet] - [EC2 Instance Connect]를 선택하여 아래처럼 접속합니다. 
-
-<img width="700" alt="image" src="https://github.com/user-attachments/assets/e8a72859-4ac7-46af-b7ae-8546ea19e7a6" />
-
-이후 아래와 같이 python, pip, git, boto3를 설치합니다.
-
-```text
-sudo yum install python3 python3-pip git docker -y
-pip install boto3
-```
-
-Workshop의 경우에 아래 형태로 된 Credential을 복사하여 EC2 터미널에 입력합니다.
-
-<img width="700" alt="credential" src="https://github.com/user-attachments/assets/261a24c4-8a02-46cb-892a-02fb4eec4551" />
-
 아래와 같이 git source를 가져옵니다.
 
 ```python
