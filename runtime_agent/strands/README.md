@@ -4,11 +4,11 @@
 
 Strands Agent는 AI agent 구축 및 실행을 위해 설계된 오픈소스 SDK입니다. 계획(planning), 사고 연결(chaining thoughts), 도구 호출, Reflection과 같은 agent 기능을 쉽게 활용할 수 있으며, Amazon Bedrock, Anthropic, Meta 등의 모델을 지원합니다.
 
-이 런타임은 Streamlit 애플리케이션(`application/`) 또는 `invoke_agent_runtime` API 클라이언트에서 호출되며, MCP 서버와 Agent Skills를 조합해 RAG, 인터넷 검색, AWS 도구, 문서 생성 등의 작업을 수행합니다.
+이 런타임은 Streamlit 애플리케이션([`application/`](../../application/)) 또는 `invoke_agent_runtime` API 클라이언트에서 호출되며, MCP 서버와 Agent Skills를 조합해 RAG, 인터넷 검색, AWS 도구, 문서 생성 등의 작업을 수행합니다.
 
 ## Operation Architecture
 
-Streamlit UI(`application/app.py`)에서 대화 모드·Skills·MCP·Strands Tools·모델을 선택하면 `agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 SSE 요청을 보냅니다. 로컬 개발 시에는 `run_agent_in_docker`로 `localhost:8080`의 Docker 컨테이너를 호출할 수 있습니다. Runtime은 `agent.py`의 `agent_strands` 엔트리포인트에서 Strands Agent, Agent Skills, 임베디드 MCP 서버를 연결한 뒤 Amazon Bedrock으로 추론합니다.
+Streamlit UI([`application/app.py`](../../application/app.py))에서 대화 모드·Skills·MCP·Strands Tools·모델을 선택하면 [`application/agentcore_client.py`](../../application/agentcore_client.py)가 AgentCore Runtime(`invoke_agent_runtime`)으로 SSE 요청을 보냅니다. 로컬 개발 시에는 `run_agent_in_docker`로 `localhost:8080`의 Docker 컨테이너를 호출할 수 있습니다. Runtime은 [`agent.py`](./agent.py)의 `agent_strands` 엔트리포인트에서 Strands Agent, Agent Skills, 임베디드 MCP 서버를 연결한 뒤 Amazon Bedrock으로 추론합니다.
 
 ```mermaid
 flowchart TB
@@ -99,17 +99,17 @@ flowchart TB
 
 | 구성 요소 | 파일 | 설명 |
 |-----------|------|------|
-| Streamlit UI | `application/app.py` | MCP·Skills·Strands Tools 선택, `run_agent` 호출 |
-| AgentCore 클라이언트 | `application/agentcore_client.py` | `invoke_agent_runtime` SSE 파싱, `run_agent_in_docker` 로컬 테스트 |
-| Runtime 엔트리포인트 | `agent.py` | `BedrockAgentCoreApp` + `agent_strands` SSE 스트리밍 |
-| Strands Agent 코어 | `strands_agent.py` | Agent 생성, `MCPClientManager`, `get_skill_instructions` 도구, 내장/strands 도구 |
-| Agent Skills | `skill.py` | `SKILL.md` 탐색, `build_skill_prompt` |
-| MCP 설정 | `mcp_config.py` | `mcp.list` 기반 MCP 서버 설정 로드 (stdio·streamable HTTP) |
-| 모델/도구 파싱 | `chat.py` | 모델 전환, `get_tool_info`, reasoning/skill 모드 |
-| 모델 프로필 | `info.py` | Bedrock 모델 프로필 (`get_model`) |
-| 설정 유틸 | `utils.py` | `config.json`, Tavily API 키 등 |
-| 배포 | `installer.py` / `Dockerfile` | ECR 이미지 빌드 및 AgentCore Runtime 생성 |
-| 원격 테스트 | `test_runtime_remote.py` | `invoke_agent_runtime` 호출 예제 |
+| Streamlit UI | [`application/app.py`](../../application/app.py) | MCP·Skills·Strands Tools 선택, `run_agent` 호출 |
+| AgentCore 클라이언트 | [`application/agentcore_client.py`](../../application/agentcore_client.py) | `invoke_agent_runtime` SSE 파싱, `run_agent_in_docker` 로컬 테스트 |
+| Runtime 엔트리포인트 | [`agent.py`](./agent.py) | `BedrockAgentCoreApp` + `agent_strands` SSE 스트리밍 |
+| Strands Agent 코어 | [`strands_agent.py`](./strands_agent.py) | Agent 생성, `MCPClientManager`, `get_skill_instructions` 도구, 내장/strands 도구 |
+| Agent Skills | [`skill.py`](./skill.py) | `SKILL.md` 탐색, `build_skill_prompt` |
+| MCP 설정 | [`mcp_config.py`](./mcp_config.py) | [`mcp.list`](./mcp.list) 기반 MCP 서버 설정 로드 (stdio·streamable HTTP) |
+| 모델/도구 파싱 | [`chat.py`](./chat.py) | 모델 전환, `get_tool_info`, reasoning/skill 모드 |
+| 모델 프로필 | [`info.py`](./info.py) | Bedrock 모델 프로필 (`get_model`) |
+| 설정 유틸 | [`utils.py`](./utils.py) | [`config.json`](./config.json), Tavily API 키 등 |
+| 배포 | [`installer.py`](./installer.py) / [`Dockerfile`](./Dockerfile) | ECR 이미지 빌드 및 AgentCore Runtime 생성 |
+| 원격 테스트 | [`test_runtime_remote.py`](./test_runtime_remote.py) | `invoke_agent_runtime` 호출 예제 |
 
 ## Agent Skills
 
@@ -160,7 +160,9 @@ execute_code 도구로 아래의 Python 코드를 실행하세요.
 ...
 ```
 
-### 포함된 스킬 (`skills.list`)
+### 포함된 스킬 ([`skills.list`](./skills.list))
+
+Streamlit UI는 [`application/skills.list`](../../application/skills.list)를, Runtime 기본값은 [`skills.list`](./skills.list)를 참조합니다.
 
 | 스킬 | 설명 |
 |------|------|
@@ -179,7 +181,7 @@ execute_code 도구로 아래의 Python 코드를 실행하세요.
 
 [`skill.py`](./skill.py)에서 구현된 스킬의 동작 흐름은 다음과 같습니다.
 
-1. **스킬 탐색**: `SkillManager`가 `skills/` 디렉토리를 스캔하여 `SKILL.md`의 YAML 프론트매터(이름, 설명)를 레지스트리에 등록합니다.
+1. **스킬 탐색**: `SkillManager`가 [`skills/`](./skills/) 디렉토리를 스캔하여 `SKILL.md`의 YAML 프론트매터(이름, 설명)를 레지스트리에 등록합니다.
 2. **프롬프트 구성**: `build_skill_prompt()`가 활성화된 스킬의 이름/설명을 `<available_skills>` XML로 시스템 프롬프트에 포함합니다.
 3. **지침 로드**: 사용자 요청에 맞는 스킬이 있으면 agent가 `get_skill_instructions` 도구를 호출하여 상세 지침을 로드합니다.
 4. **작업 수행**: 로드된 지침에 따라 `execute_code`, `bash` 등의 도구를 사용하여 작업을 수행합니다.
@@ -289,8 +291,8 @@ AgentCore MCP(streamable HTTP) 호출 시 IAM SigV4 서명이 필요하므로, `
 | 필드 | 타입 | 설명 |
 |------|------|------|
 | `prompt` | string | 사용자 질문 |
-| `mcp_servers` | list | 활성화할 MCP 서버 이름 (`mcp.list` 참조) |
-| `skill_list` | list | 활성화할 스킬 이름 (`skills.list` 참조) |
+| `mcp_servers` | list | 활성화할 MCP 서버 이름 ([`mcp.list`](./mcp.list) 참조, UI는 [`application/mcp.list`](../../application/mcp.list)) |
+| `skill_list` | list | 활성화할 스킬 이름 ([`skills.list`](./skills.list) 참조, UI는 [`application/skills.list`](../../application/skills.list)) |
 | `strands_tools` | list | strands_tools 패키지 도구 (예: `current_time`, `file_read`) |
 | `model_name` | string | Bedrock 모델 표시 이름 |
 | `user_id` | string | 사용자 식별자 |
@@ -372,7 +374,7 @@ cd runtime_agent/strands
 python3 installer.py
 ```
 
-생성된 Runtime ARN은 `config.json`의 `agent_runtime_arn`에 저장됩니다.
+생성된 Runtime ARN은 [`config.json`](./config.json)의 `agent_runtime_arn`에 저장됩니다.
 
 ### 원격 테스트
 
@@ -398,7 +400,7 @@ response = agent_core_client.invoke_agent_runtime(
 
 ### Streamlit 클라이언트
 
-루트 [`application/agentcore_client.py`](../../application/agentcore_client.py)에서 `agent_type = "strands"`로 설정하면 AgentCore Runtime을 SSE로 호출합니다.
+[`application/app.py`](../../application/app.py)가 [`application/agentcore_client.py`](../../application/agentcore_client.py)의 `run_agent()`를 호출합니다. `agentcore_client.py`에서는 `agent_type = "strands"`로 고정되어 AgentCore Runtime을 SSE로 호출합니다.
 
 ```python
 payload = json.dumps({
@@ -445,13 +447,21 @@ runtime_agent/strands/
 ├── skill.py              # Agent Skills 관리
 ├── chat.py               # 모델 설정, get_tool_info
 ├── mcp_config.py         # MCP 서버 설정
+├── mcp_server_*.py       # 임베디드 MCP 서버
 ├── skills/               # Agent Skills (SKILL.md)
 ├── artifacts/            # execute_code 실행 결과물
-├── skills.list           # 기본 활성 스킬 목록
-├── mcp.list              # 기본 MCP 서버 목록
+├── skills.list           # Runtime 기본 스킬 목록
+├── mcp.list              # Runtime MCP 서버 목록
+├── config.json           # Runtime 설정
 ├── Dockerfile
 ├── installer.py
 └── test_runtime_remote.py
+
+application/
+├── app.py                # Streamlit UI
+├── agentcore_client.py   # AgentCore / Docker 클라이언트
+├── skills.list           # UI 스킬 선택 목록
+└── mcp.list              # UI MCP 선택 목록
 ```
 
 ## Reference
