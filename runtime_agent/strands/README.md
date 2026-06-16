@@ -213,30 +213,51 @@ async def agent_strands(payload):
     skill_list = payload.get("skill_list", [])
     strands_tools = payload.get("strands_tools", [])
 
-    # MCP·도구·스킬 구성이 바뀌면 Agent 재생성
-    strands_agent.agent = strands_agent.create_agent(
-        strands_tools, mcp_servers, skill_list
+    chat.update(
+        userId=payload.get("user_id"),
+        modelName=payload.get("model_name"),
+        skillMode=payload.get("skill_mode", "Enable" if skill_list else "Disable"),
     )
 
-    with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
-        agent_stream = strands_agent.agent.stream_async(query)
+    # MCP·도구·스킬 구성이 바뀌면 Agent 재생성
+    needs_agent = (
+        strands_agent.selected_strands_tools != strands_tools
+        or strands_agent.selected_mcp_servers != mcp_servers
+        or strands_agent.selected_skill_list != skill_list
+        or strands_agent.agent is None
+    )
+    if needs_agent:
+        strands_agent.agent = strands_agent.create_agent(
+            strands_tools, mcp_servers, skill_list
+        )
+        strands_agent.mcp_manager.start_agent_clients(mcp_servers)
 
-        async for event in agent_stream:
+    image_urls, tool_names, streamed_text = [], {}, ""
+
+    with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
+        async for event in strands_agent.agent.stream_async(query):
             if "data" in event:
+                streamed_text += event["data"]
                 yield {"data": event["data"]}
             elif "current_tool_use" in event:
-                yield {
-                    "tool": event["current_tool_use"]["name"],
-                    "input": event["current_tool_use"]["input"],
-                    "toolUseId": event["current_tool_use"]["toolUseId"],
-                }
+                tool_use = event["current_tool_use"]
+                tool_names[tool_use["toolUseId"]] = tool_use["name"]
+                yield {"tool": tool_use["name"], "input": tool_use["input"],
+                       "toolUseId": tool_use["toolUseId"]}
             elif "message" in event:
-                # toolResult 이벤트 처리
-                ...
-            elif "result" in event:
-                ...
+                for item in event["message"].get("content", []):
+                    if "toolResult" not in item:
+                        continue
+                    tool_result = item["toolResult"]
+                    yield {"toolResult": tool_result["content"][0]["text"],
+                           "toolUseId": tool_result["toolUseId"]}
+                    _, urls, _ = chat.get_tool_info(
+                        tool_names.get(tool_result["toolUseId"], ""),
+                        tool_result["content"][0]["text"],
+                    )
+                    image_urls.extend(url for url in urls if url not in image_urls)
 
-    yield {"result": {"messages": result_text, "image_url": image_urls}}
+    yield {"result": {"messages": streamed_text, "image_url": image_urls}}
 ```
 
 AgentCore MCP(streamable HTTP) 호출 시 IAM SigV4 서명이 필요하므로, `auth_type = "iam"`일 때 `httpx.AsyncClient`에 SigV4 hook을 적용합니다.
@@ -290,17 +311,32 @@ MCP 클라이언트는 `MCPClientManager`가 stdio·streamable HTTP 전송을 �
 ```dockerfile
 FROM --platform=linux/arm64 python:3.13-slim
 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl gnupg build-essential python3-dev nodejs npm \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
 RUN pip install boto3 botocore --upgrade
 RUN pip install mcp
 RUN pip install strands-agents strands-agents-tools
 RUN pip install bedrock-agentcore uv
-RUN pip install python-docx openpyxl reportlab matplotlib pandas pypdf pdfplumber pyyaml
+RUN pip install Pillow pytz tavily-python requests beautifulsoup4
+RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
+RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
 
 RUN npm install docx pptxgenjs
 ENV NODE_PATH=/app/node_modules
 
+RUN pip install aws-opentelemetry-distro>=0.10.0
+
 COPY . .
+
 ENV PYTHONPATH=/app
+ENV ALLOW_MISSING_RAG_CONFIG=1
+ENV BYPASS_TOOL_CONSENT=true
+
+EXPOSE 8080
 
 CMD ["uv", "run", "opentelemetry-instrument", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]
 ```
