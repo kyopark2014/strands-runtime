@@ -1,0 +1,86 @@
+# Docker / deployment tooling (not used at runtime)
+Dockerfile
+.dockerignore
+build-docker.sh
+run-docker.sh
+installer.py
+uninstaller.py
+update.py
+test_runtime_local.py
+test_runtime_remote.py
+
+# Capability list sources (installer / UI only)
+mcp.list
+skills.list
+
+# Local deployment state
+agentcore.json
+.bedrock_agentcore.yaml
+
+# Runtime-generated output
+artifacts/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage*
+htmlcov/
+.tox/
+*.cover
+.hypothesis/
+.mypy_cache/
+.ruff_cache/
+tests/
+skills/**/scripts/test_*.py
+
+# Development
+*.log
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+
+# IDEs
+.vscode/
+.idea/
+.cursor/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Documentation (keep runtime skill metadata under skills/)
+README.md
+docs/
+*.md
+!skills/**/*.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
