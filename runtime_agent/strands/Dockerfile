@@ -13,7 +13,7 @@ WORKDIR /app
 
 RUN pip install boto3 botocore --upgrade
 RUN pip install mcp
-RUN pip install strands-agents strands-agents-tools
+RUN pip install "strands-agents[openai]>=1.44.0" "strands-agents-tools>=0.8.1"
 RUN pip install bedrock-agentcore uv
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
