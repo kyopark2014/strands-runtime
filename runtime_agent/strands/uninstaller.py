@@ -16,6 +16,71 @@ from botocore.exceptions import ClientError, NoCredentialsError
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 
+
+def _repo_root() -> str:
+    return os.path.normpath(os.path.join(script_dir, "..", ".."))
+
+
+def _load_application_config() -> dict:
+    app_config_path = os.path.join(_repo_root(), "application", "config.json")
+    try:
+        with open(app_config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _get_root_installer_value(prefix: str) -> str:
+    root_installer_path = os.path.join(_repo_root(), "installer.py")
+    try:
+        with open(root_installer_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith(f"{prefix} = "):
+                    value = stripped.split("=", 1)[1].strip()
+                    if "#" in value:
+                        value = value.split("#", 1)[0].strip()
+                    return value.strip('"').strip("'")
+    except OSError:
+        pass
+    return ""
+
+
+def _ensure_config_defaults(config: dict) -> dict:
+    updated = dict(config)
+    changed = False
+
+    region = updated.get("region") or _load_application_config().get("region") or _get_root_installer_value("region")
+    if not region:
+        region = boto3.Session().region_name or os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "us-west-2"
+    if updated.get("region") != region:
+        updated["region"] = region
+        changed = True
+
+    account_id = updated.get("accountId") or _load_application_config().get("accountId")
+    if not account_id:
+        try:
+            account_id = boto3.client("sts").get_caller_identity()["Account"]
+        except Exception:
+            account_id = ""
+    if account_id and updated.get("accountId") != account_id:
+        updated["accountId"] = account_id
+        changed = True
+
+    project_name = updated.get("projectName") or _load_application_config().get("projectName") or _get_root_installer_value("project_name")
+    if not project_name:
+        project_name = "strands-runtime"
+    if updated.get("projectName") != project_name:
+        updated["projectName"] = project_name
+        changed = True
+
+    if changed:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(updated, f, indent=2)
+
+    return updated
+
+
 def load_config():
     """Load config.json file."""
     try:
@@ -25,8 +90,8 @@ def load_config():
         print(f"Failed to parse config.json file: {e}")
         print("Error: config.json file is required for uninstallation")
         return None
-    
-    return config
+
+    return _ensure_config_defaults(config)
 
 # ============================================================================
 # Agent Runtime Deletion Functions

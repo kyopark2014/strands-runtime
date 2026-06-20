@@ -18,27 +18,15 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 
 def load_config():
-    """Load config.json file."""
+    """Load config.json and ensure required fields are populated."""
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
     except Exception as e:
         print(f"Failed to parse config.json file: {e}")
         config = {}
-        session = boto3.Session()
-        region = session.region_name
-        config['region'] = region
-        config['projectName'] = "strands-runtime"
-        
-        sts = boto3.client("sts")
-        response = sts.get_caller_identity()
-        accountId = response["Account"]
-        config['accountId'] = accountId
-        
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
-    
-    return config
+
+    return _ensure_config_defaults(config)
 
 def update_config(key, value):
     """Update config.json with a key-value pair."""
@@ -85,6 +73,23 @@ def get_knowledge_base_name() -> str:
     return "strands-runtime"
 
 
+def get_root_installer_region() -> str:
+    """Return region from repo root installer.py."""
+    root_installer_path = os.path.join(_repo_root(), "installer.py")
+    try:
+        with open(root_installer_path, "r", encoding="utf-8") as f:
+            for line in f:
+                stripped = line.strip()
+                if stripped.startswith("region = "):
+                    value = stripped.split("=", 1)[1].strip()
+                    if "#" in value:
+                        value = value.split("#", 1)[0].strip()
+                    return value.strip('"').strip("'")
+    except OSError as e:
+        print(f"Warning: Could not read root installer.py: {e}")
+    return ""
+
+
 def _load_application_config() -> dict:
     """Load application/config.json when available."""
     app_config_path = os.path.join(_repo_root(), "application", "config.json")
@@ -93,6 +98,89 @@ def _load_application_config() -> dict:
             return json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _resolve_region(config: dict) -> str:
+    region = config.get("region") or ""
+    if region:
+        return region
+
+    app_config = _load_application_config()
+    region = app_config.get("region") or ""
+    if region:
+        return region
+
+    region = get_root_installer_region()
+    if region:
+        return region
+
+    session = boto3.Session()
+    region = session.region_name or ""
+    if region:
+        return region
+
+    return os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "us-west-2"
+
+
+def _resolve_account_id(config: dict) -> str:
+    account_id = config.get("accountId") or ""
+    if account_id:
+        return account_id
+
+    app_config = _load_application_config()
+    account_id = app_config.get("accountId") or ""
+    if account_id:
+        return account_id
+
+    try:
+        sts = boto3.client("sts")
+        return sts.get_caller_identity()["Account"]
+    except Exception:
+        return ""
+
+
+def _resolve_project_name(config: dict) -> str:
+    project_name = config.get("projectName") or ""
+    if project_name:
+        return project_name
+
+    app_config = _load_application_config()
+    project_name = app_config.get("projectName") or ""
+    if project_name:
+        return project_name
+
+    return get_knowledge_base_name()
+
+
+def _ensure_config_defaults(config: dict) -> dict:
+    """Fill missing required config fields and persist updates."""
+    updated = dict(config)
+    changed = False
+
+    region = _resolve_region(updated)
+    if updated.get("region") != region:
+        updated["region"] = region
+        changed = True
+
+    account_id = _resolve_account_id(updated)
+    if account_id and updated.get("accountId") != account_id:
+        updated["accountId"] = account_id
+        changed = True
+
+    project_name = _resolve_project_name(updated)
+    if updated.get("projectName") != project_name:
+        updated["projectName"] = project_name
+        changed = True
+
+    if changed:
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(updated, f, indent=2)
+        print(
+            "  ✓ config.json defaults applied: "
+            f"region={updated.get('region')}, projectName={updated.get('projectName')}"
+        )
+
+    return updated
 
 
 def _parse_s3_vectors_names(vector_bucket_arn: str, index_arn: str) -> dict:
