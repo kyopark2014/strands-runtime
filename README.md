@@ -314,10 +314,11 @@ filesystemConfigurations에서 설정한 Session Storage는 runtime에서 아래
 ```python
 from strands import Agent
 from strands.session.file_session_manager import FileSessionManager
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 
 # Create a session manager with a unique session ID 
 session_manager = FileSessionManager(
-	session_id="test-session”,
+	session_id=BedrockAgentCoreContext.get_session_id(),
 	storage_dir="/mnt/workspace"
 )
 
