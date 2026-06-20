@@ -131,25 +131,6 @@ def _find_data_source_id(bedrock_agent_client, knowledge_base_id: str, s3_bucket
         return ""
 
 
-def _load_tavily_api_key_from_secrets(knowledge_base_name: str, region: str) -> str:
-    """Load Tavily API key from Secrets Manager."""
-    secret_names = [
-        f"tavilyapikey-{knowledge_base_name}",
-    ]
-    secrets_client = boto3.client("secretsmanager", region_name=region)
-    for secret_name in secret_names:
-        try:
-            response = secrets_client.get_secret_value(SecretId=secret_name)
-            secret_data = json.loads(response["SecretString"])
-            api_key = secret_data.get("tavily_api_key", "")
-            if api_key:
-                print(f"  ✓ Tavily API key loaded from Secrets Manager: {secret_name}")
-                return api_key
-        except ClientError as e:
-            print(f"  Warning: Could not load Tavily secret {secret_name}: {e}")
-    return ""
-
-
 def update_knowledge_base_config() -> bool:
     """Look up Knowledge Base by root installer project_name and update config.json."""
     print(f"\n{'='*60}")
@@ -196,9 +177,6 @@ def update_knowledge_base_config() -> bool:
             ):
                 if app_config.get(key):
                     updates[key] = app_config[key]
-            tavily_api_key = _load_tavily_api_key_from_secrets(knowledge_base_name, region)
-            if tavily_api_key:
-                updates["tavily_api_key"] = tavily_api_key
             config.update(updates)
             with open(config_path, "w", encoding="utf-8") as f:
                 json.dump(config, f, indent=2)
@@ -207,8 +185,6 @@ def update_knowledge_base_config() -> bool:
                 print(f"  - knowledge_base_id: {updates['knowledge_base_id']}")
             else:
                 print("✓ config.json updated with knowledge_base_name only")
-            if updates.get("tavily_api_key"):
-                print("  - tavily_api_key: configured")
             return True
 
         kb_details = bedrock_agent_client.get_knowledge_base(knowledgeBaseId=knowledge_base_id)
@@ -266,10 +242,6 @@ def update_knowledge_base_config() -> bool:
                 s3_bucket_name,
             )
 
-        tavily_api_key = _load_tavily_api_key_from_secrets(knowledge_base_name, region)
-        if tavily_api_key:
-            updates["tavily_api_key"] = tavily_api_key
-
         config.update(updates)
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=2)
@@ -280,8 +252,6 @@ def update_knowledge_base_config() -> bool:
             print(f"  - data_source_id: {updates['data_source_id']}")
         if updates.get("vector_index_arn"):
             print(f"  - vector_index_arn: {updates['vector_index_arn']}")
-        if updates.get("tavily_api_key"):
-            print("  - tavily_api_key: configured")
         return True
     except Exception as e:
         print(f"Error updating Knowledge Base configuration: {e}")
@@ -327,7 +297,6 @@ def create_bedrock_agentcore_policy(config):
                 "Resource": [
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/cognito/credentials*",
                     f"arn:aws:secretsmanager:{region}:*:secret:{projectName}/credentials*",
-                    f"arn:aws:secretsmanager:{region}:*:secret:tavilyapikey-*",
                 ]
             },
             {
@@ -628,6 +597,10 @@ def check_aws_credentials():
         print(f"Error: Failed to verify AWS credentials: {e}")
         return False
 
+DOCKER_MIN_FREE_MB = 2048
+DOCKER_REQUIRED_FREE_MB = 1024
+
+
 def ensure_ecr_repository(ecr_client, repository_name, region):
     """Check if ECR repository exists, create if it doesn't."""
     try:
@@ -647,6 +620,114 @@ def ensure_ecr_repository(ecr_client, repository_name, region):
         else:
             print(f"Error: Failed to check repository: {e}")
             return False
+
+
+def _filesystem_free_mb(path: str) -> int:
+    try:
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def _docker_data_root() -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "/var/lib/docker"
+
+
+def _print_disk_usage(label: str, path: str) -> int:
+    free_mb = _filesystem_free_mb(path)
+    if free_mb >= 0:
+        print(f"  {label}: {free_mb} MB free ({path})", flush=True)
+    return free_mb
+
+
+def cleanup_docker_resources() -> None:
+    """Remove unused Docker data to reclaim disk space before build."""
+    print("===== Cleaning Up Docker Resources =====", flush=True)
+    for cmd, label in [
+        (["docker", "builder", "prune", "-af"], "BuildKit cache"),
+        (["docker", "image", "prune", "-af"], "Unused images"),
+        (["docker", "container", "prune", "-f"], "Stopped containers"),
+        (["docker", "volume", "prune", "-f"], "Unused volumes"),
+    ]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode == 0:
+                output = (result.stdout or result.stderr).strip().splitlines()
+                detail = output[-1] if output else "done"
+                print(f"  ✓ Pruned {label}: {detail}", flush=True)
+            else:
+                err = (result.stderr or result.stdout).strip()
+                print(f"  Warning: Failed to prune {label}: {err}", flush=True)
+        except Exception as e:
+            print(f"  Warning: Failed to prune {label}: {e}", flush=True)
+
+
+def ensure_docker_disk_space(min_free_mb: int = DOCKER_MIN_FREE_MB) -> bool:
+    """Ensure enough free disk space for Docker build; prune if needed."""
+    print("===== Checking Docker Disk Space =====", flush=True)
+    docker_root = _docker_data_root()
+    root_free = _print_disk_usage("Root filesystem", "/")
+    docker_free = _print_disk_usage("Docker data directory", docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+
+    if free_mb >= min_free_mb:
+        print(f"  ✓ Sufficient disk space ({free_mb} MB >= {min_free_mb} MB)", flush=True)
+        return True
+
+    print(
+        f"  Warning: Low disk space ({free_mb} MB free, need ~{min_free_mb} MB). "
+        "Attempting Docker cleanup...",
+        flush=True,
+    )
+    cleanup_docker_resources()
+
+    root_free = _print_disk_usage("Root filesystem after cleanup", "/")
+    docker_free = _print_disk_usage("Docker data directory after cleanup", docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+
+    if free_mb >= DOCKER_REQUIRED_FREE_MB:
+        print(f"  ✓ Disk space available after cleanup ({free_mb} MB)", flush=True)
+        return True
+
+    print("Error: Not enough disk space for Docker build.", flush=True)
+    print("  CloudShell and similar environments have limited storage.", flush=True)
+    print("  Manual cleanup options:", flush=True)
+    print("    docker system prune -af", flush=True)
+    print("    rm -rf ~/.cache/pip ~/.npm /tmp/*", flush=True)
+    print("  Or build elsewhere and rerun the root installer with --skip-docker-build.", flush=True)
+    return False
+
+
+def remove_local_docker_images(image_refs: list[str]) -> None:
+    """Delete local image tags after a successful push to free disk space."""
+    unique_refs = []
+    for ref in image_refs:
+        if ref and ref not in unique_refs:
+            unique_refs.append(ref)
+    if not unique_refs:
+        return
+
+    print("===== Removing Local Docker Images =====", flush=True)
+    subprocess.run(
+        ["docker", "rmi", "-f", *unique_refs],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    cleanup_docker_resources()
+
 
 def check_docker_daemon(timeout: int = 30) -> bool:
     """Verify Docker daemon is reachable before build/push."""
@@ -715,6 +796,123 @@ def docker_login(account_id, region):
         print(f"Error: Failed to login to ECR: {e}")
         return False
 
+ARM64_BUILDX_BUILDER = "strands-arm64-builder"
+
+
+def _host_machine() -> str:
+    return os.uname().machine.lower()
+
+
+def _host_is_arm64() -> bool:
+    return _host_machine() in ("aarch64", "arm64")
+
+
+def setup_arm64_cross_build() -> bool:
+    """Enable ARM64 cross-build via QEMU and buildx on x86_64 hosts."""
+    print("===== Setting Up ARM64 Cross-Build =====", flush=True)
+    print(f"  Host architecture: {os.uname().machine}", flush=True)
+    print("  AgentCore requires linux/arm64 images.", flush=True)
+
+    binfmt = subprocess.run(
+        ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", "all"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if binfmt.returncode == 0:
+        print("  ✓ QEMU binfmt handlers installed", flush=True)
+    else:
+        err = (binfmt.stderr or binfmt.stdout).strip()
+        print(f"  Warning: QEMU binfmt setup returned {binfmt.returncode}: {err}", flush=True)
+
+    inspect = subprocess.run(
+        ["docker", "buildx", "inspect", ARM64_BUILDX_BUILDER],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        create = subprocess.run(
+            [
+                "docker", "buildx", "create",
+                "--name", ARM64_BUILDX_BUILDER,
+                "--driver", "docker-container",
+                "--use",
+                "--bootstrap",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if create.returncode != 0:
+            err = (create.stderr or create.stdout).strip()
+            print(f"Error: Failed to create buildx builder: {err}", flush=True)
+            return False
+    else:
+        use = subprocess.run(
+            ["docker", "buildx", "use", ARM64_BUILDX_BUILDER],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if use.returncode != 0:
+            err = (use.stderr or use.stdout).strip()
+            print(f"Error: Failed to select buildx builder: {err}", flush=True)
+            return False
+
+    platforms = subprocess.run(
+        ["docker", "buildx", "inspect", "--bootstrap"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = (platforms.stdout or platforms.stderr).lower()
+    if "arm64" not in output and "aarch64" not in output:
+        print("Error: buildx builder does not advertise linux/arm64 support.", flush=True)
+        return False
+
+    print("  ✓ ARM64 cross-build ready (buildx + QEMU)", flush=True)
+    return True
+
+
+def build_and_push_arm64_image(local_tag: str, ecr_uri: str) -> bool:
+    """Build an ARM64 image and push it to ECR."""
+    if _host_is_arm64():
+        if not run_docker_command(
+            ["docker", "build", "--platform", "linux/arm64", "-t", local_tag, "."],
+            "Building Docker Image",
+        ):
+            return False
+        if not run_docker_command(
+            ["docker", "tag", local_tag, ecr_uri],
+            "Tagging for ECR Repository",
+        ):
+            return False
+        return run_docker_command(
+            ["docker", "push", ecr_uri],
+            "Pushing Image to ECR Repository",
+        )
+
+    if not setup_arm64_cross_build():
+        return False
+
+    return run_docker_command(
+        [
+            "docker", "buildx", "build",
+            "--platform", "linux/arm64",
+            "-t", ecr_uri,
+            "--push",
+            ".",
+        ],
+        "Building and Pushing Docker Image (ARM64 cross-build)",
+    )
+
+
 def run_docker_command(command, description):
     """Run Docker command with live output (plain BuildKit progress)."""
     print(f"===== {description} =====", flush=True)
@@ -728,6 +926,17 @@ def run_docker_command(command, description):
         )
         if result.returncode != 0:
             print(f"Error: {description} failed (exit {result.returncode})", flush=True)
+            if command and command[0] == "docker" and "build" in command:
+                print(
+                    "  If the build log shows 'exec format error', the host cannot run "
+                    "ARM64 build steps without QEMU/buildx cross-build support.",
+                    flush=True,
+                )
+                print(
+                    "  If the build log shows 'no space left on device', run "
+                    "'docker system prune -af' and retry.",
+                    flush=True,
+                )
             return False
         return True
     except Exception as e:
@@ -791,38 +1000,26 @@ def push_to_ecr():
 
         if not check_docker_daemon():
             return False
-        
-        # ECR Login
+
+        if not ensure_docker_disk_space():
+            return False
+
         print("===== AWS ECR Login =====", flush=True)
         if not docker_login(aws_account_id, aws_region):
             return False
         
         # Build Docker image
         print("Build output streams below (this may take several minutes)...", flush=True)
-        if not run_docker_command(
-            ["docker", "build", "-t", f"{ecr_repository}:{image_tag}", "."],
-            "Building Docker Image"
-        ):
-            return False
-        
-        # Tag for ECR repository
-        if not run_docker_command(
-            ["docker", "tag", f"{ecr_repository}:{image_tag}", ecr_uri],
-            "Tagging for ECR Repository"
-        ):
-            return False
-        
-        # Push to ECR
-        if not run_docker_command(
-            ["docker", "push", ecr_uri],
-            "Pushing Image to ECR Repository"
-        ):
+        local_tag = f"{ecr_repository}:{image_tag}"
+        if not build_and_push_arm64_image(local_tag, ecr_uri):
             return False
         
         # Complete
         print("===== Complete =====")
         print("Image has been successfully built and pushed to ECR.")
         print(f"Image URI: {ecr_uri}")
+
+        remove_local_docker_images([local_tag, ecr_uri])
         
         # Store image tag in config for later use
         update_config('latest_image_tag', image_tag)

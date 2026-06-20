@@ -51,7 +51,6 @@ BEDROCK_NON_FILTERABLE_METADATA_KEYS = [
 # Initialize boto3 clients
 s3_client = boto3.client("s3", region_name=region)
 iam_client = boto3.client("iam", region_name=region)
-secrets_client = boto3.client("secretsmanager", region_name=region)
 opensearch_client = boto3.client("opensearchserverless", region_name=region)
 s3vectors_client = boto3.client("s3vectors", region_name=region)
 ec2_client = boto3.client("ec2", region_name=region)
@@ -705,59 +704,6 @@ def create_ecs_roles(knowledge_base_role_arn: str) -> Dict[str, str]:
         "task_role_arn": task_role_arn,
         "execution_role_arn": execution_role_arn,
     }
-
-
-def create_secrets() -> Dict[str, str]:
-    """Create Secrets Manager secrets."""
-    logger.info("[3/10] Creating Secrets Manager secrets")
-    logger.info("Please enter API keys when prompted (press Enter to skip and leave empty):")
-    
-    secrets = {
-        "tavily": {
-            "name": f"tavilyapikey-{project_name}",
-            "description": "secret for tavily api key",
-            "secret_value": {
-                "project_name": project_name,
-                "tavily_api_key": ""
-            }
-        }
-    }
-    
-    secret_arns = {}
-    
-    for key, secret_config in secrets.items():
-        # Check if secret already exists before prompting for input
-        try:
-            response = secrets_client.describe_secret(SecretId=secret_config["name"])
-            secret_arns[key] = response["ARN"]
-            logger.warning(f"  Secret already exists: {secret_config['name']}")
-        except ClientError as e:
-            if e.response["Error"]["Code"] == "ResourceNotFoundException":
-                # Secret doesn't exist, prompt for API key and create it
-                if key == "tavily":
-                    logger.info(f"Enter credential of {secret_config['name']} (Tavily API Key):")
-                    api_key = input(f"Creating {secret_config['name']} - Tavily API Key: ").strip()
-                    secret_config["secret_value"]["tavily_api_key"] = api_key
-                
-                # Create the secret
-                try:
-                    response = secrets_client.create_secret(
-                        Name=secret_config["name"],
-                        Description=secret_config["description"],
-                        SecretString=json.dumps(secret_config["secret_value"])
-                    )
-                    secret_arns[key] = response["ARN"]
-                    logger.info(f"  ✓ Created secret: {secret_config['name']}")
-                except ClientError as create_error:
-                    logger.error(f"  Failed to create secret {secret_config['name']}: {create_error}")
-                    raise
-            else:
-                logger.error(f"  Failed to check secret {secret_config['name']}: {e}")
-                raise
-    
-    logger.info(f"✓ Created {len(secret_arns)} secrets")
-    
-    return secret_arns
 
 
 def create_opensearch_collection(ec2_role_arn: str = None, knowledge_base_role_arn: str = None) -> Dict[str, str]:
@@ -3727,6 +3673,84 @@ def resolve_ecr_image_uri(repository_uri: str, image_tag: Optional[str] = None) 
     return f"{repository_uri}:latest"
 
 
+DOCKER_MIN_FREE_MB = 2048
+DOCKER_REQUIRED_FREE_MB = 1024
+
+
+def _docker_data_root() -> str:
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{.DockerRootDir}}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "/var/lib/docker"
+
+
+def _filesystem_free_mb(path: str) -> int:
+    try:
+        return shutil.disk_usage(path).free // (1024 * 1024)
+    except OSError:
+        return -1
+
+
+def _cleanup_docker_resources() -> None:
+    logger.info("  Cleaning up unused Docker data to reclaim disk space...")
+    for cmd, label in [
+        (["docker", "builder", "prune", "-af"], "BuildKit cache"),
+        (["docker", "image", "prune", "-af"], "Unused images"),
+        (["docker", "container", "prune", "-f"], "Stopped containers"),
+        (["docker", "volume", "prune", "-f"], "Unused volumes"),
+    ]:
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False)
+            if result.returncode == 0:
+                output = (result.stdout or result.stderr).strip().splitlines()
+                detail = output[-1] if output else "done"
+                logger.info(f"  ✓ Pruned {label}: {detail}")
+            else:
+                err = (result.stderr or result.stdout).strip()
+                logger.warning(f"  Failed to prune {label}: {err}")
+        except Exception as e:
+            logger.warning(f"  Failed to prune {label}: {e}")
+
+
+def _ensure_docker_disk_space(min_free_mb: int = DOCKER_MIN_FREE_MB) -> None:
+    docker_root = _docker_data_root()
+    root_free = _filesystem_free_mb("/")
+    docker_free = _filesystem_free_mb(docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+    logger.info(f"  Disk space: root={root_free} MB, docker={docker_free} MB ({docker_root})")
+
+    if free_mb >= min_free_mb:
+        logger.info(f"  ✓ Sufficient disk space ({free_mb} MB >= {min_free_mb} MB)")
+        return
+
+    logger.warning(
+        f"  Low disk space ({free_mb} MB free, need ~{min_free_mb} MB). "
+        "Attempting Docker cleanup..."
+    )
+    _cleanup_docker_resources()
+
+    root_free = _filesystem_free_mb("/")
+    docker_free = _filesystem_free_mb(docker_root)
+    free_mb = min(root_free, docker_free) if root_free >= 0 and docker_free >= 0 else max(root_free, docker_free)
+    logger.info(f"  Disk space after cleanup: root={root_free} MB, docker={docker_free} MB")
+
+    if free_mb < DOCKER_REQUIRED_FREE_MB:
+        raise RuntimeError(
+            "Not enough disk space for Docker build. "
+            "Run 'docker system prune -af', free space under /var/lib/docker, "
+            "or use --skip-docker-build with an image built elsewhere."
+        )
+
+
 def build_and_push_docker_image(
     repository_uri: str, image_tag: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -3763,6 +3787,8 @@ def build_and_push_docker_image(
     )
     if docker_login.returncode != 0:
         raise RuntimeError(f"Docker login to ECR failed: {docker_login.stderr.strip()}")
+
+    _ensure_docker_disk_space()
 
     logger.info(f"  Starting Docker build: {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
@@ -5010,11 +5036,7 @@ def main():
         )
         logger.info(f"IAM roles created...")
         
-        # 3. Create secrets
-        secret_arns = create_secrets()
-        logger.info(f"Secrets created...")
-        
-        # 4. Create S3 Vectors store
+        # 3. Create S3 Vectors store
         s3_vectors_info = create_s3_vectors_store()
         logger.info("S3 Vectors store created...")
         

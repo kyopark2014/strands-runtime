@@ -1027,7 +1027,6 @@ def delete_secrets():
     
     secret_names = [
         f"openweathermap-{project_name}",
-        f"tavilyapikey-{project_name}"
     ]
     
     for secret_name in secret_names:
