@@ -239,6 +239,102 @@ if "text/event-stream" in response.get("contentType", ""):
 ```
 
 
+## 프로젝트 구조
+
+프로젝트는 **Streamlit UI(`application/`)** 와 **Strands Agent Runtime(`runtime_agent/strands/`)** 으로 나뉩니다. UI는 ECS에서 사용자 입력·MCP/Skill/Strands Tools·모델 선택·스트리밍 결과 표시만 담당하고, Agent 추론·MCP·Skill 실행은 AgentCore Runtime 컨테이너에서 수행합니다.
+
+루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base(S3 Vectors) 등 AWS 인프라를 배포하고, [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다.
+
+### `application/` — Streamlit UI (ECS)
+
+루트 [Dockerfile](./Dockerfile)로 빌드되어 ECS에 배포됩니다. AgentCore Runtime을 `invoke_agent_runtime`으로 호출하며, Agent 로직은 포함하지 않습니다.
+
+```text
+application/
+├── app.py                  # Streamlit 진입점. 모드·MCP·Skill·Strands Tools·모델 선택, 채팅 UI
+├── agentcore_client.py     # AgentCore Runtime 호출 (invoke_agent_runtime, SSE 파싱)
+├── chat.py                 # UI 세션·대화 상태 관리
+├── utils.py                # config.json 로드, 공통 유틸
+├── notification_queue.py   # 도구 호출·스트리밍 알림 큐
+├── info.py                 # 앱 메타 정보
+├── mcp.list                # UI MCP 체크박스 목록 (Runtime의 mcp.list와 대응)
+├── skills.list             # UI Skill 체크박스 목록 (Runtime의 skills.list와 대응)
+└── config.json             # region, projectName, agentRuntimeArn 등 (배포 시 생성)
+```
+
+| 파일 | 역할 |
+|------|------|
+| `app.py` | Agent / Agent (Chat) 모드, MCP·Skill·Strands Tools·모델 선택 후 `agentcore_client.run_agent` 호출 |
+| `agentcore_client.py` | payload(prompt, mcp_servers, skill_list, strands_tools, history_mode)를 Runtime으로 전송하고 SSE 스트림 처리 |
+| `mcp.list` · `skills.list` | UI에 노출할 MCP·Skill 이름 목록. 선택값은 Runtime payload로 전달됨 |
+
+### `runtime_agent/strands/` — Strands Agent (AgentCore Runtime)
+
+[runtime_agent/strands/Dockerfile](./runtime_agent/strands/Dockerfile)로 arm64 이미지를 빌드하고, [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)로 AgentCore Runtime에 배포합니다.
+
+```text
+runtime_agent/strands/
+├── agent.py                # BedrockAgentCoreApp 엔트리포인트 (agent_strands)
+├── strands_agent.py        # Strands Agent, BedrockModel, MCP·Skill·도구 바인딩
+├── chat.py                 # FileSessionManager 기반 대화 메모리
+├── skill.py                # SkillManager, get_skill_instructions 도구
+├── mcp_config.py           # 선택된 MCP → stdio subprocess command/args 매핑
+├── mcp_server_*.py         # MCP 서버 (retrieve, trade_info, image_generation, korea_weather 등)
+├── mcp_retrieve.py         # Knowledge Base RAG MCP
+├── agentcore_sigv4_auth.py # AgentCore MCP 호출용 SigV4 인증
+├── mcp.list                # 지원 MCP 목록
+├── skills.list             # 지원 Skill 목록
+├── utils.py                # config 로드, Tavily API key(Secrets Manager) 등
+├── info.py                 # 모델 프로필·메타 정보
+├── installer.py            # AgentCore Runtime·IAM·ECR 배포
+├── uninstaller.py          # AgentCore Runtime 리소스 삭제
+├── test_runtime_remote.py  # 원격 Runtime 호출 테스트
+├── Dockerfile              # AgentCore Runtime 컨테이너 이미지
+├── config.json             # Knowledge Base ID, region, projectName 등
+└── skills/                 # Skill 정의 (아래 참조)
+    ├── docx/
+    ├── pptx/
+    ├── xlsx/
+    ├── pdf/
+    ├── skill-creator/
+    ├── kma-weather/
+    ├── usa-weather/
+    └── subway/
+```
+
+| 구분 | 모듈 | 설명 |
+|------|------|------|
+| **엔트리포인트** | `agent.py` | AgentCore 요청 수신 → `strands_agent` 실행 |
+| **Agent** | `strands_agent.py` | Strands SDK `Agent`, BedrockModel, MCPClientManager, 내장 도구 |
+| **MCP** | `mcp_config.py`, `mcp_server_*.py` | UI에서 선택된 MCP를 컨테이너 내 stdio subprocess로 기동 |
+| **Skill** | `skill.py`, `skills/` | `SKILL.md` 기반 지침. `get_skill_instructions` 도구로 로드 |
+| **설정·배포** | `utils.py`, `installer.py`, `config.json` | AWS 리소스 연동, Secrets Manager, Runtime 배포 |
+
+### Skill 구조 (`runtime_agent/strands/skills/`)
+
+각 Skill은 `SKILL.md` 파일이 핵심이며, 필요에 따라 `scripts/`, `references/`, `assets/` 등의 보조 폴더를 포함할 수 있습니다. UI의 `application/skills.list`에서 선택한 이름과 `runtime_agent/strands/skills/` 하위 디렉터리가 대응합니다. (예: `seoul-subway` → `subway/`)
+
+```text
+skills/
+├── docx/
+│   ├── SKILL.md          # YAML 프론트매터 + 상세 지침
+│   └── scripts/          # 문서 처리 스크립트
+├── pptx/
+│   └── SKILL.md
+├── xlsx/
+│   └── SKILL.md
+├── pdf/
+│   └── SKILL.md
+├── kma-weather/
+│   ├── SKILL.md
+│   └── scripts/
+├── usa-weather/
+│   └── scripts/
+├── subway/
+│   └── SKILL.md
+└── skill-creator/
+    └── SKILL.md
+```
 
 
 ## Runtime Agent
