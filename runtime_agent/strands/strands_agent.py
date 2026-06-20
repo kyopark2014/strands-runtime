@@ -26,6 +26,8 @@ from botocore.config import Config
 from dataclasses import dataclass
 from strands import Agent, tool
 from urllib import parse
+from strands.session.file_session_manager import FileSessionManager
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -1168,6 +1170,13 @@ def update_tools(strands_tools: list, mcp_servers: list):
             
     return tools
 
+def get_runtime_session_id() -> str:
+    runtime_session_id = BedrockAgentCoreContext.get_session_id()
+    if not runtime_session_id:
+        logger.warning("runtimeSessionId not found in request context; using 'default-session'")
+        runtime_session_id = "default-session"
+    return runtime_session_id
+
 def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: list[str]):
     init_mcp_clients(mcp_servers)
 
@@ -1184,12 +1193,18 @@ def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: l
         system_prompt = BASE_SYSTEM_PROMPT
 
     model = get_model()
+
+    session_manager = FileSessionManager(
+        session_id=get_runtime_session_id(),
+        storage_dir="/mnt/workspace"
+    )
     
     agent = Agent(
         model=model,
         system_prompt=system_prompt,
         tools=tools,
         conversation_manager=conversation_manager,
+        session_manager=session_manager
         #max_parallel_tools=2
     )
 
@@ -1210,6 +1225,7 @@ def get_tool_list(tools):
 selected_strands_tools = []
 selected_mcp_servers = []
 selected_skill_list = []
+selected_session_id = None
 agent = None
 
 async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: list[str], skill_list: list[str], notification_queue):
@@ -1220,17 +1236,21 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_session_id
+
+    current_session_id = get_runtime_session_id()
 
     if (
         selected_strands_tools != strands_tools
         or selected_mcp_servers != mcp_servers
         or selected_skill_list != skill_list
+        or selected_session_id != current_session_id
         or agent is None
     ):
         selected_strands_tools = list(strands_tools)
         selected_mcp_servers = list(mcp_servers)
         selected_skill_list = list(skill_list)
+        selected_session_id = current_session_id
 
         mcp_manager.stop_agent_clients()
 

@@ -328,8 +328,75 @@ agent = Agent(session_manager=session_manager)
 agent("Hello!") # This conversation is persisted
 ```
 
-#### Conversation Manager와 File Session Manager의 차이
+### Conversation Manager와 File Session Manager의 차이
 
+Strands Agent는 `conversation_manager`와 `session_manager`를 **독립적으로** 받을 수 있으며, **함께 사용하는 것이 정상적인 패턴**입니다. 두 매니저는 역할이 다릅니다.
+
+| | `conversation_manager` | `session_manager` |
+|---|---|---|
+| **역할** | 모델에 보낼 **대화 컨텍스트 관리** | 대화·상태 **영속 저장** |
+| **관심사** | 메모리, 토큰 한도, 컨텍스트 길이 | 프로세스 재시작 후에도 세션 유지 |
+| **동작 시점** | 매 호출/턴에서 in-memory로 동작 | 메시지·상태 변경 시 파일에 저장 |
+| **현재 구현** | `SlidingWindowConversationManager(window_size=10)` | `FileSessionManager(session_id=..., storage_dir="/mnt/workspace")` |
+
+**`conversation_manager`** — "지금 모델에게 뭘 보여줄까?"
+
+- 대화 히스토리 크기 제어 (슬라이딩 윈도우, 요약, truncation)
+- 컨텍스트 윈도우 초과 시 `reduce_context()`로 복구
+- 큰 tool result 잘라내기
+- **런타임 중** in-memory에서 동작
+
+**`session_manager`** — "다음에 다시 켜도 기억할까?"
+
+- 메시지, agent state, `conversation_manager_state`를 **디스크에 저장**
+- AgentCore Runtime의 session storage(`/mnt/workspace`)와 연동
+- 재시작 후 세션 복원
+
+둘을 같이 쓰면 역할이 다음과 같이 나뉩니다.
+
+```
+[전체 대화 히스토리]  ← session_manager가 디스크에 저장
+        ↓
+[슬라이딩 윈도우 10턴] ← conversation_manager가 모델에 전달할 부분만 선택
+        ↓
+      LLM 호출
+```
+
+[`strands_agent.py`](./runtime_agent/strands/strands_agent.py)에서는 두 매니저를 함께 사용합니다.
+
+```python
+from strands.agent.conversation_manager import SlidingWindowConversationManager
+from strands.session.file_session_manager import FileSessionManager
+
+conversation_manager = SlidingWindowConversationManager(
+    window_size=10,
+)
+
+session_manager = FileSessionManager(
+    session_id="test-session",
+    storage_dir="/mnt/workspace"
+)
+
+agent = Agent(
+    model=model,
+    system_prompt=system_prompt,
+    tools=tools,
+    conversation_manager=conversation_manager,  # 컨텍스트 관리
+    session_manager=session_manager,            # 영속 저장
+)
+```
+
+SDK 내부에서도 함께 동작하도록 설계되어 있습니다.
+
+- `conversation_manager.apply_management()` — 호출 후 컨텍스트 정리
+- `conversation_manager.reduce_context()` 후 `session_manager.sync_agent()` — 압축 결과를 세션에 반영
+- 세션 복원 시 `conversation_manager.restore_from_session()` — 이전 윈도우/요약 상태 복원
+
+**주의사항**
+
+- `session_id`는 사용자/요청별로 고유하게 설정해야 합니다. 고정값(`"test-session"`)을 쓰면 모든 사용자가 같은 세션을 공유합니다.
+- `window_size=10`이면 디스크에는 전체 대화가 저장되지만, 모델에는 최근 10턴만 전달됩니다.
+- `/mnt/workspace`는 AgentCore session storage 마운트가 있어야 `FileSessionManager`가 정상 동작합니다.
 
 ### AgentCore Runtime으로 Agent 배포하기
 

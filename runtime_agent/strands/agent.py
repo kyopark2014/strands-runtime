@@ -139,12 +139,14 @@ async def agent_strands(payload):
         strands_agent.selected_strands_tools != strands_tools
         or strands_agent.selected_mcp_servers != mcp_servers
         or strands_agent.selected_skill_list != skill_list
+        or strands_agent.selected_session_id != strands_agent.get_runtime_session_id()
         or strands_agent.agent is None
     )
     if needs_agent:
         strands_agent.selected_strands_tools = list(strands_tools)
         strands_agent.selected_mcp_servers = list(mcp_servers)
         strands_agent.selected_skill_list = list(skill_list)
+        strands_agent.selected_session_id = strands_agent.get_runtime_session_id()
 
         strands_agent.mcp_manager.stop_agent_clients()
         strands_agent.agent = strands_agent.create_agent(
