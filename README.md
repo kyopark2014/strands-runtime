@@ -516,45 +516,56 @@ SDK 내부에서도 함께 동작하도록 설계되어 있습니다.
 
 
 
+
+
+
 ## 배포하기
 
-AWS console의 CloudShell을 접속합니다. 이후 아래와 같이 python, pip, git, boto3를 설치합니다.
+아래와 같이 EC2를 이용해 배포 환경을 구성합니다.
+
+1. AWS Console의 EC2에 접속해서 [Launch instance]를 선택합니다.
+2. EC2 생성시 Architecture로 Arm64을 선택하고 나머지는 기본값으로 생성합니다.
+3. [EC2 Instance Connect]로 접속해서 아래와 같이 python, pip, git, boto3를 설치합니다.
 
 ```text
-sudo yum install python3 python3-pip git docker -y
-pip install boto3 --upgrade
+sudo yum install python3 python3-pip git 
+pip install boto3 
 ```
 
-아래와 같이 git source를 가져옵니다.
+4. 아래 명령어로 docker를 설치합니다.
+
+```bash
+sudo yum install -y docker
+sudo systemctl start docker
+sudo systemctl enable docker
+sudo usermod -aG docker ec2-user
+newgrp docker
+docker info
+```
+
+5. 아래와 같이 git source를 가져옵니다.
 
 ```python
 git clone https://github.com/kyopark2014/strands-runtime
 ```
 
-아래와 같이 runtime을 배포합니다.
+6. 아래와 같이 [installer.py](./installer.py)를 이용해 설치를 시작합니다.
 
-```python
-python3 strands-runtime/runtime_agent/strands/installer.py 
+```text
+python3 strands-runtimeinstaller.py
 ```
-
-이후 아래와 같이 ECS를 배포합니다.
-
-```python
-python3 strands-runtime/installer.py 
-```
-
 
 
 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
 
-접속한 후 아래와 같이 Agent를 선택한 후에 적절한 MCP/SKILL을 선택하여 원하는 작업을 수행합니다.
+접속한 후 아래와 같이 Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
 
-
-인프라가 더이상 필요없을 때에는 uninstaller.py를 이용해 제거합니다.
+인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다.
 
 ```text
 python uninstaller.py
 ```
+
 
 
 ### Knowledge Base 문서 동기화 하기 
