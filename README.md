@@ -163,27 +163,23 @@ print(f"✓ Agent runtime created: {response['agentRuntimeArn']}")
 Agent에서 MCP server로 요청을 보낼때에는 아래와 같이 IAM 인증을 수행하기 위하여 request에 X-Amz-Security-Token을 포함합니다. 이를 위해 httpx의 event hook을 이용해 아래와 같이 구현할 수 있습니다. 상세코드는 [agent.py](https://github.com/kyopark2014/agent-runtime/blob/main/runtime_agent/Strands/agent.py)을 참조합니다.
 
 ```python
-original_init = httpx.AsyncClient.__init__
-def patched_init(self, *args, **kwargs):
-    # Add SigV4 signing event hook if needed
+def _patched_httpx_async_init(self, *args, **kwargs):
     async def sign_request(request: httpx.Request) -> None:
-        """Sign the request with AWS SigV4 including the body"""
-        # Only sign requests to bedrock-agentcore
-        if "bedrock-agentcore" not in str(request.url):
+        url_str = str(request.url)
+        if "bedrock-agentcore" not in url_str:
             return
-        
-        # Get credentials
+        if ".gateway.bedrock-agentcore." in url_str:
+            return
+        if request.headers.get("Authorization"):
+            return
+
         boto_session = boto3.Session()
         credentials = boto_session.get_credentials().get_frozen_credentials()
-        
-        # Parse URL
-        parsed_url = urlparse(str(request.url))
+
+        parsed_url = urlparse(url_str)
         host = parsed_url.netloc
-        
-        # Generate timestamp
-        timestamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
-        
-        # Read request body if available
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
         body = None
         if request.content:
             if isinstance(request.content, bytes):
@@ -191,59 +187,48 @@ def patched_init(self, *args, **kwargs):
             else:
                 try:
                     body = await request.aread()
-                    if hasattr(request, '_content'):
+                    if hasattr(request, "_content"):
                         request._content = body
                 except Exception:
                     pass
-        
-        # Create AWS request headers
+
         aws_headers = {
-            'host': host,
-            'x-amz-date': timestamp,
-            'Content-Type': request.headers.get('Content-Type', 'application/json'),
-            'Accept': request.headers.get('Accept', 'application/json, text/event-stream')
+            "host": host,
+            "x-amz-date": timestamp,
+            "Content-Type": request.headers.get("Content-Type", "application/json"),
+            "Accept": request.headers.get("Accept", "application/json, text/event-stream"),
         }
-        
         if body:
-            aws_headers['Content-Length'] = str(len(body))
-        
-        # Create AWS request for signing
+            aws_headers["Content-Length"] = str(len(body))
+
         aws_request = AWSRequest(
             method=request.method,
-            url=str(request.url),
+            url=url_str,
             headers=aws_headers,
-            data=body
+            data=body,
         )
-        
-        # Sign the request
-        region = utils.load_config().get("region", "us-west-2")
+
+        region = _sigv4_region_for_bedrock_agentcore_url(url_str)
         auth = BotocoreSigV4Auth(credentials, "bedrock-agentcore", region)
         auth.add_auth(aws_request)
-        
-        # Update request headers
-        request.headers['X-Amz-Date'] = timestamp
-        request.headers['Authorization'] = aws_request.headers['Authorization']
-        
-        if credentials.token:
-            request.headers['X-Amz-Security-Token'] = credentials.token
-    
-    # Add event_hooks to kwargs if not already present
-    if 'event_hooks' not in kwargs:
-        kwargs['event_hooks'] = {'request': [], 'response': []}
-    elif not isinstance(kwargs['event_hooks'], dict):
-        kwargs['event_hooks'] = {'request': [], 'response': []}
-    
-    if 'request' not in kwargs['event_hooks']:
-        kwargs['event_hooks']['request'] = []
-    
-    # Add the sign_request hook
-    kwargs['event_hooks']['request'].append(sign_request)
 
-    # Call original init with modified kwargs
-    original_init(self, *args, **kwargs)
+        request.headers["X-Amz-Date"] = timestamp
+        request.headers["Authorization"] = aws_request.headers["Authorization"]
+        if credentials.token:
+            request.headers["X-Amz-Security-Token"] = credentials.token
+
+    if "event_hooks" not in kwargs:
+        kwargs["event_hooks"] = {"request": [], "response": []}
+    elif not isinstance(kwargs["event_hooks"], dict):
+        kwargs["event_hooks"] = {"request": [], "response": []}
+    if "request" not in kwargs["event_hooks"]:
+        kwargs["event_hooks"]["request"] = []
+    kwargs["event_hooks"]["request"].append(sign_request)
+
+    _original_httpx_async_init(self, *args, **kwargs)
 ```
 
-그리고 이를 tool을 실행할때 사용합니다.  
+이후 아래와 같이 auth_type이 iam이면, httpx.AsyncClient을 업데이트 합니다.
 
 ```python
 import httpx
@@ -252,34 +237,48 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 app = BedrockAgentCoreApp()
 
 @app.entrypoint
-async def agent_Strands(payload):
-    httpx.AsyncClient.__init__ = patched_init
+async def agent_strands(payload):
+    """Invoke the Strands agent with a payload."""
     
-    client = MultiServerMCPClient(server_params)
-    tools = await client.get_tools()
-    
-    app = buildChatAgentWithHistory(tools)
-    config = {
-        "recursion_limit": 50,
-        "configurable": {"thread_id": user_id},
-        "tools": tools,
-        "system_prompt": None
-    }
-    
-    inputs = {"messages": [HumanMessage(content=query)]}
-            
-    value = final_output = None
-    async for output in app.astream(inputs, config):
-        for key, value in output.items():
-            logger.info(f"--> key: {key}, value: {value}")
+    query = payload.get("prompt")
+    mcp_servers = payload.get("mcp_servers", [])
+    skill_list = payload.get("skill_list", [])
+    strands_tools = payload.get("strands_tools", strands_agent.strands_tools or [])
+    model_name = payload.get("model_name")
+    user_id = payload.get("user_id")
 
-            if key == "messages" or key == "agent":
-                if isinstance(value, dict) and "messages" in value:
-                    final_output = value
-                elif isinstance(value, list):
-                    final_output = {"messages": value, "image_url": []}
-                else:
-                    final_output = {"messages": [value], "image_url": []}
+    if auth_type == "iam":
+        httpx.AsyncClient.__init__ = _patched_httpx_async_init
+
+    strands_agent.mcp_manager.start_agent_clients(mcp_servers)
+
+    with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
+        agent_stream = strands_agent.agent.stream_async(query)
+
+        async for event in agent_stream:
+            if "data" in event:
+                text = event["data"]
+                streamed_text += text
+                logger.info(f"[data] {text}")
+                yield {"data": text}
+
+            elif "result" in event:
+                final = event["result"]
+                message = final.message
+                if message:
+                    content = message.get("content", [])
+                    text = content[0].get("text", "") if content else ""
+                    logger.info(f"[result] {text}")
+                    final_output = {"messages": text, "image_url": image_urls}
+
+        result_text = final_output.get("messages") or streamed_text
+
+        final_output = {
+            "messages": result_text if result_text else "답변을 찾지 못하였습니다.",
+            "image_url": image_urls,
+        }
+
+    yield {"result": final_output}
 ```
 
 
