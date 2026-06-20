@@ -522,7 +522,7 @@ AWS console의 CloudShell을 접속합니다. 이후 아래와 같이 python, pi
 
 ```text
 sudo yum install python3 python3-pip git docker -y
-pip install boto3
+pip install boto3 --upgrade
 ```
 
 아래와 같이 git source를 가져옵니다.
@@ -536,10 +536,6 @@ git clone https://github.com/kyopark2014/strands-runtime
 ```python
 cd strands-runtime && python3 installer.py
 ```
-
-API 구현에 필요한 credential은 secret으로 관리합니다. 따라서 설치시 필요한 credential 입력이 필요한데 아래와 같은 방식을 활용하여 미리 credential을 준비합니다. 
-
-- 일반 인터넷 검색: [Tavily Search](https://app.tavily.com/sign-in)에 접속하여 가입 후 API Key를 발급합니다. 이것은 tvly-로 시작합니다.  
 
 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
 
