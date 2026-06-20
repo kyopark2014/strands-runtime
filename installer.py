@@ -3675,6 +3675,12 @@ def resolve_ecr_image_uri(repository_uri: str, image_tag: Optional[str] = None) 
 
 DOCKER_MIN_FREE_MB = 2048
 DOCKER_REQUIRED_FREE_MB = 1024
+CONTAINER_PLATFORM = "linux/arm64"
+ARM64_BUILDX_BUILDER = "ecs-arm64-builder"
+ECS_RUNTIME_PLATFORM = {
+    "cpuArchitecture": "ARM64",
+    "operatingSystemFamily": "LINUX",
+}
 
 
 def _docker_data_root() -> str:
@@ -3719,6 +3725,81 @@ def _cleanup_docker_resources() -> None:
                 logger.warning(f"  Failed to prune {label}: {err}")
         except Exception as e:
             logger.warning(f"  Failed to prune {label}: {e}")
+
+
+def _host_machine() -> str:
+    return os.uname().machine.lower()
+
+
+def _host_is_arm64() -> bool:
+    return _host_machine() in ("aarch64", "arm64")
+
+
+def _setup_arm64_cross_build() -> None:
+    """Enable ARM64 cross-build via QEMU and buildx on x86_64 hosts."""
+    logger.info("  Setting up ARM64 cross-build (ECS Fargate requires linux/arm64 images)")
+    logger.info(f"  Host architecture: {os.uname().machine}")
+
+    binfmt = subprocess.run(
+        ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", "all"],
+        capture_output=True,
+        text=True,
+        timeout=180,
+        check=False,
+    )
+    if binfmt.returncode == 0:
+        logger.info("  ✓ QEMU binfmt handlers installed")
+    else:
+        err = (binfmt.stderr or binfmt.stdout).strip()
+        logger.warning(f"  QEMU binfmt setup returned {binfmt.returncode}: {err}")
+
+    inspect = subprocess.run(
+        ["docker", "buildx", "inspect", ARM64_BUILDX_BUILDER],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    if inspect.returncode != 0:
+        create = subprocess.run(
+            [
+                "docker", "buildx", "create",
+                "--name", ARM64_BUILDX_BUILDER,
+                "--driver", "docker-container",
+                "--use",
+                "--bootstrap",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        if create.returncode != 0:
+            err = (create.stderr or create.stdout).strip()
+            raise RuntimeError(f"Failed to create buildx builder: {err}")
+    else:
+        use = subprocess.run(
+            ["docker", "buildx", "use", ARM64_BUILDX_BUILDER],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+        if use.returncode != 0:
+            err = (use.stderr or use.stdout).strip()
+            raise RuntimeError(f"Failed to select buildx builder: {err}")
+
+    platforms = subprocess.run(
+        ["docker", "buildx", "inspect", "--bootstrap"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    output = (platforms.stdout or platforms.stderr).lower()
+    if "arm64" not in output and "aarch64" not in output:
+        raise RuntimeError("buildx builder does not advertise linux/arm64 support")
+    logger.info("  ✓ ARM64 cross-build ready (buildx + QEMU)")
 
 
 def _ensure_docker_disk_space(min_free_mb: int = DOCKER_MIN_FREE_MB) -> None:
@@ -3790,21 +3871,34 @@ def build_and_push_docker_image(
 
     _ensure_docker_disk_space()
 
-    logger.info(f"  Starting Docker build: {image_uri}")
+    logger.info(f"  Starting Docker build (ARM64): {image_uri}")
     logger.info("  Build output streams below (this may take several minutes)...")
-    _run_command_streaming(
-        ["docker", "build", "--platform", "linux/amd64", "-t", image_uri, "."],
-        cwd=project_root,
-    )
-    logger.info("  ✓ Docker build completed")
-
-    _run_command_streaming(["docker", "tag", image_uri, latest_uri])
-    logger.info(f"  Tagged image as latest: {latest_uri}")
-
-    logger.info(f"  Starting Docker push: {image_uri}")
-    _run_command_streaming(["docker", "push", image_uri])
-    logger.info(f"  Starting Docker push: {latest_uri}")
-    _run_command_streaming(["docker", "push", latest_uri])
+    if _host_is_arm64():
+        _run_command_streaming(
+            ["docker", "build", "--platform", CONTAINER_PLATFORM, "-t", image_uri, "."],
+            cwd=project_root,
+        )
+        logger.info("  ✓ Docker build completed")
+        _run_command_streaming(["docker", "tag", image_uri, latest_uri])
+        logger.info(f"  Tagged image as latest: {latest_uri}")
+        logger.info(f"  Starting Docker push: {image_uri}")
+        _run_command_streaming(["docker", "push", image_uri])
+        logger.info(f"  Starting Docker push: {latest_uri}")
+        _run_command_streaming(["docker", "push", latest_uri])
+    else:
+        _setup_arm64_cross_build()
+        _run_command_streaming(
+            [
+                "docker", "buildx", "build",
+                "--platform", CONTAINER_PLATFORM,
+                "-t", image_uri,
+                "-t", latest_uri,
+                "--push",
+                ".",
+            ],
+            cwd=project_root,
+        )
+        logger.info("  ✓ Docker build and push completed (ARM64 cross-build)")
     logger.info(f"  ✓ Pushed image: {image_uri}")
     return image_uri, image_tag
 
@@ -4017,6 +4111,7 @@ def deploy_ecs_service(
         family=task_family,
         networkMode="awsvpc",
         requiresCompatibilities=["FARGATE"],
+        runtimePlatform=ECS_RUNTIME_PLATFORM,
         cpu="1024",
         memory="2048",
         executionRoleArn=ecs_roles["execution_role_arn"],

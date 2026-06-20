@@ -920,6 +920,7 @@ def docker_login(account_id, region):
         return False
 
 ARM64_BUILDX_BUILDER = "strands-arm64-builder"
+CONTAINER_PLATFORM = "linux/arm64"
 
 
 def _host_machine() -> str:
@@ -934,7 +935,7 @@ def setup_arm64_cross_build() -> bool:
     """Enable ARM64 cross-build via QEMU and buildx on x86_64 hosts."""
     print("===== Setting Up ARM64 Cross-Build =====", flush=True)
     print(f"  Host architecture: {os.uname().machine}", flush=True)
-    print("  AgentCore requires linux/arm64 images.", flush=True)
+    print(f"  AgentCore requires {CONTAINER_PLATFORM} images.", flush=True)
 
     binfmt = subprocess.run(
         ["docker", "run", "--privileged", "--rm", "tonistiigi/binfmt", "--install", "all"],
@@ -1007,7 +1008,7 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str) -> bool:
     """Build an ARM64 image and push it to ECR."""
     if _host_is_arm64():
         if not run_docker_command(
-            ["docker", "build", "--platform", "linux/arm64", "-t", local_tag, "."],
+            ["docker", "build", "--platform", CONTAINER_PLATFORM, "-t", local_tag, "."],
             "Building Docker Image",
         ):
             return False
@@ -1027,7 +1028,7 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str) -> bool:
     return run_docker_command(
         [
             "docker", "buildx", "build",
-            "--platform", "linux/arm64",
+            "--platform", CONTAINER_PLATFORM,
             "-t", ecr_uri,
             "--push",
             ".",
