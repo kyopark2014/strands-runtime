@@ -145,6 +145,13 @@ response = client.create_agent_runtime(
             'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
         }
     },
+	filesystemConfigurations=[
+		{
+			"sessionStorage": {
+				"mountPath": "/mnt/workspace"
+			}
+		}
+	],
     networkConfiguration={"networkMode": "PUBLIC"}, 
     roleArn=agent_runtime_role,
     protocolConfiguration={"serverProtocol": "MCP"}
