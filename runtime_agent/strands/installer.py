@@ -10,7 +10,9 @@ import sys
 import os
 import json
 import shutil
+import argparse
 from datetime import datetime
+from typing import Optional
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
@@ -830,6 +832,10 @@ def check_docker_daemon(timeout: int = 30) -> bool:
         )
         if result.returncode != 0:
             print(f"Error: Docker daemon is not available: {result.stderr.strip()}")
+            print(
+                "  Build on a machine with Docker, push to ECR, then rerun with "
+                "--skip-docker-build on this host."
+            )
             return False
         print("  ✓ Docker daemon is running", flush=True)
         return True
@@ -1031,7 +1037,53 @@ def run_docker_command(command, description):
         print(f"Error: {description} failed: {e}", flush=True)
         return False
 
-def push_to_ecr():
+def resolve_ecr_image_tag(
+    ecr_client,
+    repository_name: str,
+    config: dict,
+    image_tag: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve an ECR image tag from explicit input, config, or newest pushed image."""
+    if image_tag:
+        return image_tag
+
+    saved_tag = config.get("latest_image_tag")
+    if saved_tag:
+        print(f"  Using saved image tag from config.json: {saved_tag}")
+        return saved_tag
+
+    try:
+        response = ecr_client.describe_images(
+            repositoryName=repository_name,
+            filter={"tagStatus": "TAGGED"},
+        )
+        images = response.get("imageDetails", [])
+        if images:
+            latest_image = sorted(images, key=lambda x: x["imagePushedAt"], reverse=True)[0]
+            tags = latest_image.get("imageTags") or []
+            if tags:
+                print(f"  Using latest ECR image tag: {tags[0]}")
+                return tags[0]
+    except ClientError as e:
+        print(f"Error resolving latest ECR image tag: {e}")
+
+    return None
+
+
+def verify_ecr_image_tag(ecr_client, repository_name: str, image_tag: str) -> bool:
+    """Return True when the repository contains the given image tag."""
+    try:
+        ecr_client.describe_images(
+            repositoryName=repository_name,
+            imageIds=[{"imageTag": image_tag}],
+        )
+        return True
+    except ClientError as e:
+        print(f"Error: Image tag '{image_tag}' not found in {repository_name}: {e}")
+        return False
+
+
+def push_to_ecr(*, skip_docker_build: bool = False, image_tag: Optional[str] = None):
     """Build Docker image and push to ECR"""
     print(f"\n{'='*60}")
     print("Building Docker image and pushing to ECR")
@@ -1085,6 +1137,29 @@ def push_to_ecr():
         ecr_client = boto3.client("ecr", region_name=aws_region)
         if not ensure_ecr_repository(ecr_client, ecr_repository, aws_region):
             return False
+
+        if skip_docker_build:
+            print("===== Skipping Docker build; reusing existing ECR image =====", flush=True)
+            resolved_tag = resolve_ecr_image_tag(
+                ecr_client, ecr_repository, config, image_tag=image_tag
+            )
+            if not resolved_tag:
+                print(
+                    "Error: No image tag found. Build and push an image from a host with Docker, "
+                    "or pass --image-tag."
+                )
+                return False
+            if not verify_ecr_image_tag(ecr_client, ecr_repository, resolved_tag):
+                return False
+
+            ecr_uri = (
+                f"{aws_account_id}.dkr.ecr.{aws_region}.amazonaws.com/"
+                f"{ecr_repository}:{resolved_tag}"
+            )
+            print(f"Using existing image: {ecr_uri}")
+            update_config("latest_image_tag", resolved_tag)
+            update_config("ecr_repository", ecr_repository)
+            return True
 
         if not check_docker_daemon():
             return False
@@ -1369,6 +1444,22 @@ def create_agent_runtime():
 
 def main():
     """Main function: Execute the entire installation process."""
+    parser = argparse.ArgumentParser(description="AgentCore Runtime Installation Script")
+    parser.add_argument(
+        "--skip-docker-build",
+        action="store_true",
+        help="Skip local Docker build/push and reuse an existing image in ECR.",
+    )
+    parser.add_argument(
+        "--image-tag",
+        metavar="TAG",
+        help="ECR image tag to use with --skip-docker-build (default: config or latest in ECR).",
+    )
+    args = parser.parse_args()
+
+    if args.image_tag and not args.skip_docker_build:
+        print("Warning: --image-tag is only used with --skip-docker-build")
+
     print("\n" + "="*60)
     print("AgentCore Runtime Installation Script")
     print("="*60)
@@ -1380,12 +1471,24 @@ def main():
     print(f"  - Project Name: {config.get('projectName')}")
     print(f"  - Region: {config.get('region')}")
     print(f"  - Account ID: {config.get('accountId')}")
+
+    def push_step() -> bool:
+        return push_to_ecr(
+            skip_docker_build=args.skip_docker_build,
+            image_tag=args.image_tag,
+        )
+
+    docker_step_name = (
+        "Reusing existing ECR image"
+        if args.skip_docker_build
+        else "Building Docker image and pushing to ECR"
+    )
     
     # Execute each step
     steps = [
         ("Updating Knowledge Base configuration", update_knowledge_base_config),
         ("Creating IAM policies and roles", create_iam_policies),
-        ("Building Docker image and pushing to ECR", push_to_ecr),
+        (docker_step_name, push_step),
         ("Creating/updating AgentCore runtime", create_agent_runtime),
     ]
     
