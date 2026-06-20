@@ -534,7 +534,7 @@ git clone https://github.com/kyopark2014/strands-runtime
 아래와 같이 installer.py를 이용해 설치를 시작합니다.
 
 ```python
-cd strands-runtime && python3 installer.py
+cd strands-runtime && python3 installer.py 
 ```
 
 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. 
