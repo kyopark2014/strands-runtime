@@ -19,17 +19,6 @@ from botocore.exceptions import ClientError, NoCredentialsError
 script_dir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(script_dir, "config.json")
 
-def load_config():
-    """Load config.json and ensure required fields are populated."""
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    except Exception as e:
-        print(f"Failed to parse config.json file: {e}")
-        config = {}
-
-    return _ensure_config_defaults(config)
-
 def update_config(key, value):
     """Update config.json with a key-value pair."""
     try:
@@ -102,8 +91,17 @@ def _load_application_config() -> dict:
         return {}
 
 
+def _session_region() -> str:
+    """Return AWS region from the active boto3 session."""
+    return boto3.Session().region_name or ""
+
+
 def _resolve_region(config: dict) -> str:
     region = config.get("region") or ""
+    if region:
+        return region
+
+    region = _session_region()
     if region:
         return region
 
@@ -116,12 +114,43 @@ def _resolve_region(config: dict) -> str:
     if region:
         return region
 
-    session = boto3.Session()
-    region = session.region_name or ""
-    if region:
-        return region
-
     return os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "us-west-2"
+
+
+def _create_config_from_session() -> dict:
+    """Initialize config fields from boto3 session when config.json is missing."""
+    region = _resolve_region({})
+    config = {
+        "region": region,
+        "projectName": get_knowledge_base_name(),
+    }
+
+    try:
+        sts = boto3.client("sts", region_name=region)
+        config["accountId"] = sts.get_caller_identity()["Account"]
+    except Exception as e:
+        print(f"Warning: Could not resolve account ID from STS: {e}")
+
+    print(
+        f"  ✓ config.json initialized from boto3 session "
+        f"(region={config.get('region')}, projectName={config.get('projectName')})"
+    )
+    return config
+
+
+def load_config():
+    """Load config.json and ensure required fields are populated."""
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except FileNotFoundError:
+        print("config.json not found, initializing from boto3 session...")
+        config = _create_config_from_session()
+    except Exception as e:
+        print(f"Failed to parse config.json file: {e}")
+        config = {}
+
+    return _ensure_config_defaults(config)
 
 
 def _resolve_account_id(config: dict) -> str:

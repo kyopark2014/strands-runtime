@@ -46,13 +46,62 @@ def _get_root_installer_value(prefix: str) -> str:
     return ""
 
 
+def _session_region() -> str:
+    """Return AWS region from the active boto3 session."""
+    return boto3.Session().region_name or ""
+
+
+def _resolve_region(config: dict) -> str:
+    region = config.get("region") or ""
+    if region:
+        return region
+
+    region = _session_region()
+    if region:
+        return region
+
+    region = _load_application_config().get("region") or ""
+    if region:
+        return region
+
+    region = _get_root_installer_value("region")
+    if region:
+        return region
+
+    return os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "us-west-2"
+
+
+def _create_config_from_session() -> dict:
+    """Initialize config fields from boto3 session when config.json is missing."""
+    region = _resolve_region({})
+    project_name = (
+        _load_application_config().get("projectName")
+        or _get_root_installer_value("project_name")
+        or "strands-runtime"
+    )
+    config = {
+        "region": region,
+        "projectName": project_name,
+    }
+
+    try:
+        sts = boto3.client("sts", region_name=region)
+        config["accountId"] = sts.get_caller_identity()["Account"]
+    except Exception as e:
+        print(f"Warning: Could not resolve account ID from STS: {e}")
+
+    print(
+        f"  ✓ config.json initialized from boto3 session "
+        f"(region={config.get('region')}, projectName={config.get('projectName')})"
+    )
+    return config
+
+
 def _ensure_config_defaults(config: dict) -> dict:
     updated = dict(config)
     changed = False
 
-    region = updated.get("region") or _load_application_config().get("region") or _get_root_installer_value("region")
-    if not region:
-        region = boto3.Session().region_name or os.environ.get("AWS_DEFAULT_REGION") or os.environ.get("AWS_REGION") or "us-west-2"
+    region = _resolve_region(updated)
     if updated.get("region") != region:
         updated["region"] = region
         changed = True
@@ -60,7 +109,7 @@ def _ensure_config_defaults(config: dict) -> dict:
     account_id = updated.get("accountId") or _load_application_config().get("accountId")
     if not account_id:
         try:
-            account_id = boto3.client("sts").get_caller_identity()["Account"]
+            account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
         except Exception:
             account_id = ""
     if account_id and updated.get("accountId") != account_id:
@@ -86,6 +135,9 @@ def load_config():
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             config = json.load(f)
+    except FileNotFoundError:
+        print("config.json not found, initializing from boto3 session...")
+        config = _create_config_from_session()
     except Exception as e:
         print(f"Failed to parse config.json file: {e}")
         print("Error: config.json file is required for uninstallation")
