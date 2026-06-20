@@ -31,6 +31,7 @@ ec2_client = boto3.client("ec2", region_name=region)
 elbv2_client = boto3.client("elbv2", region_name=region)
 cloudfront_client = boto3.client("cloudfront", region_name=region)
 bedrock_agent_client = boto3.client("bedrock-agent", region_name=region)
+s3vectors_client = boto3.client("s3vectors", region_name=region)
 ecs_client = boto3.client("ecs", region_name=region)
 ecr_client = boto3.client("ecr", region_name=region)
 logs_client = boto3.client("logs", region_name=region)
@@ -44,6 +45,8 @@ if not account_id:
     account_id = sts_client.get_caller_identity()["Account"]
 
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
+vector_index_name = project_name
+vector_bucket_name = f"{project_name}-{account_id}"
 
 # Configure logging
 def setup_logging():
@@ -1021,6 +1024,52 @@ def delete_knowledge_bases():
     except Exception as e:
         logger.error(f"Error deleting Knowledge Bases: {e}")
 
+def _is_s3_vectors_not_found(error: ClientError) -> bool:
+    code = error.response["Error"]["Code"]
+    return code in ("NotFoundException", "ResourceNotFoundException", "NoSuchResource")
+
+
+def delete_s3_vectors_store():
+    """Delete S3 Vectors vector index and bucket created by installer.py."""
+    logger.info("[5.6/9] Deleting S3 Vectors store")
+
+    try:
+        try:
+            indexes = s3vectors_client.list_indexes(vectorBucketName=vector_bucket_name)
+            for idx in indexes.get("indexes", []):
+                idx_name = idx.get("indexName")
+                if not idx_name:
+                    continue
+                try:
+                    s3vectors_client.delete_index(
+                        vectorBucketName=vector_bucket_name,
+                        indexName=idx_name,
+                    )
+                    logger.info(f"  ✓ Deleted vector index: {idx_name}")
+                except ClientError as e:
+                    if _is_s3_vectors_not_found(e):
+                        logger.debug(f"  Vector index already deleted: {idx_name}")
+                    else:
+                        logger.warning(f"  Could not delete vector index {idx_name}: {e}")
+        except ClientError as e:
+            if _is_s3_vectors_not_found(e):
+                logger.info(f"  Vector bucket not found: {vector_bucket_name}")
+                return
+            logger.warning(f"  Could not list vector indexes in {vector_bucket_name}: {e}")
+
+        try:
+            s3vectors_client.delete_vector_bucket(vectorBucketName=vector_bucket_name)
+            logger.info(f"  ✓ Deleted vector bucket: {vector_bucket_name}")
+        except ClientError as e:
+            if _is_s3_vectors_not_found(e):
+                logger.info(f"  Vector bucket already deleted: {vector_bucket_name}")
+            else:
+                logger.warning(f"  Could not delete vector bucket {vector_bucket_name}: {e}")
+
+        logger.info("✓ S3 Vectors store deleted")
+    except Exception as e:
+        logger.error(f"Error deleting S3 Vectors store: {e}")
+
 def delete_secrets():
     """Delete Secrets Manager secrets."""
     logger.info("[6/9] Deleting secrets")
@@ -1900,6 +1949,7 @@ def main():
         
         delete_opensearch_collection()
         delete_knowledge_bases()
+        delete_s3_vectors_store()
         agentcore_gateway_deleted = delete_agentcore_websearch_gateway(
             skip_confirmation=args.delete_agentcore_gateway
         )

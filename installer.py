@@ -285,23 +285,74 @@ def attach_inline_policy(role_name: str, policy_name: str, policy_document: Dict
         raise
 
 
+def _bedrock_knowledge_base_trust_policy() -> Dict:
+    """Trust policy for Bedrock Knowledge Base service role (AWS recommended)."""
+    return {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {"Service": "bedrock.amazonaws.com"},
+                "Action": "sts:AssumeRole",
+                "Condition": {
+                    "StringEquals": {"aws:SourceAccount": account_id},
+                    "ArnLike": {
+                        "aws:SourceArn": (
+                            f"arn:aws:bedrock:{region}:{account_id}:knowledge-base/*"
+                        )
+                    },
+                },
+            }
+        ],
+    }
+
+
+def _principal_allows_service(principal: Dict, service: str) -> bool:
+    """Return True when principal allows the given AWS service."""
+    if not isinstance(principal, dict):
+        return False
+    allowed = principal.get("Service", [])
+    if isinstance(allowed, str):
+        allowed = [allowed]
+    return service in allowed
+
+
+def wait_for_iam_role_propagation(role_name: str, wait_seconds: int = 15) -> None:
+    """Wait for IAM role and inline policies to propagate."""
+    logger.info(f"  Waiting {wait_seconds}s for IAM role propagation: {role_name}")
+    time.sleep(wait_seconds)
+
+    expected_policies = {
+        f"bedrock-invoke-policy-for-{project_name}",
+        f"knowledge-base-s3-policy-for-{project_name}",
+        f"bedrock-agent-s3vectors-policy-for-{project_name}",
+        f"bedrock-agent-bedrock-policy-for-{project_name}",
+    }
+    for attempt in range(3):
+        try:
+            attached = iam_client.list_role_policies(RoleName=role_name)
+            missing = expected_policies - set(attached.get("PolicyNames", []))
+            if not missing:
+                logger.info("  ✓ Knowledge Base role inline policies are attached")
+                return
+            logger.debug(
+                f"  Waiting for inline policies (attempt {attempt + 1}/3): {sorted(missing)}"
+            )
+        except ClientError as e:
+            logger.debug(f"  Could not list role policies yet: {e}")
+        time.sleep(5)
+
+    logger.warning(
+        "  Some Knowledge Base role inline policies may not be visible yet; continuing"
+    )
+
+
 def create_knowledge_base_role() -> str:
     """Create Knowledge Base IAM role."""
     logger.info("[2/10] Creating Knowledge Base IAM role")
     role_name = f"role-knowledge-base-for-{project_name}-{region}"
     
-    assume_role_policy = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Principal": {
-                    "Service": "bedrock.amazonaws.com"
-                },
-                "Action": "sts:AssumeRole"
-            }
-        ]
-    }
+    assume_role_policy = _bedrock_knowledge_base_trust_policy()
     
     role_arn = create_iam_role(role_name, assume_role_policy)
     
@@ -351,10 +402,12 @@ def create_knowledge_base_role() -> str:
         pass
 
     bucket_arn = s3_vectors_bucket_arn()
+    index_arn = s3_vectors_index_arn()
     s3vectors_policy = {
         "Version": "2012-10-17",
         "Statement": [
             {
+                "Sid": "S3VectorBucketReadAndWritePermission",
                 "Effect": "Allow",
                 "Action": [
                     "s3vectors:GetVectorBucket",
@@ -369,7 +422,7 @@ def create_knowledge_base_role() -> str:
                 ],
                 "Resource": [
                     bucket_arn,
-                    f"{bucket_arn}/index/*",
+                    index_arn,
                 ],
             }
         ],
@@ -394,6 +447,7 @@ def create_knowledge_base_role() -> str:
     }
     attach_inline_policy(role_name, f"bedrock-agent-bedrock-policy-for-{project_name}", bedrock_policy)
     
+    wait_for_iam_role_propagation(role_name)
     return role_arn
 
 
@@ -2785,7 +2839,7 @@ def create_knowledge_base_with_s3_vectors(
         for statement in statements:
             if statement.get("Effect") == "Allow":
                 principal = statement.get("Principal", {})
-                if principal.get("Service") == "bedrock.amazonaws.com":
+                if _principal_allows_service(principal, "bedrock.amazonaws.com"):
                     bedrock_allowed = True
                     break
 
@@ -2800,7 +2854,7 @@ def create_knowledge_base_with_s3_vectors(
         raise
 
     logger.debug(f"Creating Knowledge Base with S3 Vectors index: {s3_vectors_info['indexArn']}")
-    response = bedrock_agent_client.create_knowledge_base(
+    kb_create_params = dict(
         name=project_name,
         description="Knowledge base with default parser (S3 Vectors)",
         roleArn=knowledge_base_role_arn,
@@ -2825,6 +2879,35 @@ def create_knowledge_base_with_s3_vectors(
             },
         },
     )
+
+    max_retries = 6
+    response = None
+    for attempt in range(max_retries):
+        try:
+            response = bedrock_agent_client.create_knowledge_base(**kb_create_params)
+            break
+        except ClientError as e:
+            error_message = e.response.get("Error", {}).get("Message", str(e))
+            if (
+                e.response.get("Error", {}).get("Code") == "ValidationException"
+                and "unable to assume the given role" in error_message.lower()
+                and attempt < max_retries - 1
+            ):
+                wait_seconds = 10 * (attempt + 1)
+                logger.warning(
+                    "  Bedrock could not assume the Knowledge Base role yet "
+                    f"(attempt {attempt + 1}/{max_retries}). Retrying in {wait_seconds}s..."
+                )
+                logger.warning(
+                    "  If this persists, ensure the EC2/instance role has iam:PassRole "
+                    f"for {knowledge_base_role_arn}"
+                )
+                time.sleep(wait_seconds)
+                continue
+            raise
+
+    if response is None:
+        raise Exception("Knowledge Base creation failed after retries")
 
     knowledge_base_id = response["knowledgeBase"]["knowledgeBaseId"]
     logger.info(f"✓ Knowledge Base created: {knowledge_base_id}")
