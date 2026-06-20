@@ -552,7 +552,7 @@ git clone https://github.com/kyopark2014/strands-runtime
 6. 아래와 같이 [installer.py](./installer.py)를 이용해 설치를 시작합니다.
 
 ```text
-python3 strands-runtimeinstaller.py
+python3 strands-runtime/installer.py
 ```
 
 
