@@ -419,42 +419,6 @@ response = client.create_agent_runtime(
 agentRuntimeArn = response['agentRuntimeArn']
 ```
 
-Runtime agent를 생성하기 전에 기존 runtime이 있는지는 아래와 같이 [list_agent_runtimes](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/list_agent_runtimes.html)을 이용해 확인할 수 있습니다.
-
-```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
-response = client.list_agent_runtimes()
-
-isExist = False
-agentRuntimeId = None
-agentRuntimes = response['agentRuntimes']
-targetAgentRuntime = repositoryName
-if len(agentRuntimes) > 0:
-    for agentRuntime in agentRuntimes:
-        agentRuntimeName = agentRuntime['agentRuntimeName']
-        if agentRuntimeName == targetAgentRuntime:
-            agentRuntimeId = agentRuntime['agentRuntimeId']
-            isExist = True        
-            break
-```
-
-이미 runtime이 있다면 아래와 같이 [update_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore-control/client/update_agent_runtime.html)을 이용해 업데이트 합니다.
-
-```python
-response = client.update_agent_runtime(
-    agentRuntimeId=agentRuntimeId,
-    description="Update agent runtime",
-    agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{accountId}.dkr.ecr.{aws_region}.amazonaws.com/{targetAgentRuntime}:{imageTags}"
-        }
-    },
-    roleArn=agent_runtime_role,
-    networkConfiguration={"networkMode":"PUBLIC"},
-    protocolConfiguration={"serverProtocol":"HTTP"}
-)
-```
-
 
 ### Knowledge Base 문서 동기화 하기 
 
