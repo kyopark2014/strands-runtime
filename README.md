@@ -327,6 +327,8 @@ agent = Agent(session_manager=session_manager)
 agent("Hello!") # This conversation is persisted
 ```
 
+#### Conversation Manager와 File Session Manager의 차이
+
 
 ### AgentCore Runtime으로 Agent 배포하기
 
