@@ -863,6 +863,7 @@ session_manager = FileSessionManager(
 agent = Agent(
     model=model,
     tools=tools,
+    plugins=[skills_plugin] if skills_plugin else [],
     conversation_manager=conversation_manager,
     session_manager=session_manager,
 )
