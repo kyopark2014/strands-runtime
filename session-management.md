@@ -29,23 +29,40 @@ conversation_manager = SlidingWindowConversationManager(
 
 ### session_manager — Agent 생성마다 새로 생성
 
+`create_agent()`에서 Strands SDK의 `FileSessionManager`를 사용해 세션을 디스크에 영속화합니다.
+
 ```python
-# runtime_agent/strands/strands_agent.py (create_agent)
+# runtime_agent/strands/strands_agent.py
+from strands.session.file_session_manager import FileSessionManager
+from bedrock_agentcore.runtime.context import BedrockAgentCoreContext
+```
+
+`create_agent()` 내부:
+
+```python
+# runtime_agent/strands/strands_agent.py (create_agent, L1117–1129)
 session_manager = FileSessionManager(
     session_id=get_runtime_session_id(),
-    storage_dir="/mnt/workspace"
+    storage_dir="/mnt/workspace",
 )
 
 agent = Agent(
     model=model,
-    system_prompt=system_prompt,
+    system_prompt=BASE_SYSTEM_PROMPT,
     tools=tools,
+    plugins=[skills_plugin] if skills_plugin else [],
     conversation_manager=conversation_manager,
-    session_manager=session_manager
+    session_manager=session_manager,
 )
 ```
 
+| 파라미터 | 값 | 설명 |
+|---|---|---|
+| `session_id` | `get_runtime_session_id()` | Bedrock AgentCore 요청 컨텍스트의 `runtimeSessionId` |
+| `storage_dir` | `"/mnt/workspace"` | AgentCore Session Storage 마운트 경로 (S3 Files 등) |
+
 - `create_agent()` 호출마다 `session_id`에 맞는 `FileSessionManager`를 새로 만듭니다.
+- `plugins`(AgentSkills)는 세션 저장과 무관하며, `session_manager`만 대화·agent state를 디스크에 기록합니다.
 - `session_id`는 Bedrock AgentCore 요청 컨텍스트의 `runtimeSessionId`에서 가져옵니다.
 
 ```python
@@ -69,10 +86,23 @@ def get_runtime_session_id() -> str:
    - 모델 호출 시 `agent.messages`가 전달됩니다.
    - `conversation_manager`는 이 배열을 **in-place로 trim**합니다.
 
-2. **`window_size=50`**
+2. **`window_size=50` — 메시지 개수 기준**
+   - `window_size`는 **사용자 턴(turn) 수가 아니라** `agent.messages` 배열의 **메시지 개수**입니다 (`len(agent.messages)`).
    - 매 invocation 종료 후 `apply_management()`가 호출됩니다.
    - 메시지가 50개를 넘으면 오래된 메시지를 **메모리에서 제거**합니다.
-   - 디스크에는 전체 대화가 남고, 모델에는 **최근 50턴만** 전달됩니다.
+   - 디스크에는 전체 대화가 남고, 모델에는 **최근 50개 메시지**만 전달됩니다.
+
+   **한 번의 사용자 요청이 쌓는 메시지 수** (Strands event loop 기준):
+
+   | 흐름 | `agent.messages`에 추가되는 메시지 | 합계 |
+   |---|---|---|
+   | `request → response` (tool 없음) | `user`(request) + `assistant`(response) | **2** |
+   | `request → toolUse → toolResult → response` | `user` + `assistant`(toolUse) + `user`(toolResult) + `assistant`(response) | **4** |
+
+   따라서 `window_size=50`이면 tool 없는 대화 약 **25회**, tool 1회씩 포함 대화 약 **12~13회** 수준까지 메모리에 남을 수 있습니다 (실제 tool 호출 횟수에 따라 달라짐).
+
+   - trim 시 `toolUse` / `toolResult` **쌍이 깨지지 않도록** SDK가 유효한 경계에서만 잘라냅니다.
+   - 컨텍스트 overflow 시에는 메시지 제거 전에 큰 **tool result** 텍스트를 부분 truncate할 수 있습니다 (`should_truncate_results=True`, 기본값).
 
 3. **제거된 메시지 추적**
    - `removed_message_count`로 슬라이딩 윈도우로 잘려 나간 메시지 수를 기록합니다.
@@ -197,7 +227,7 @@ if (
 
 ## 정리
 
-1. **`conversation_manager`**: 런타임 중 `agent.messages`를 **모델 컨텍스트 한도 내**로 유지 (슬라이딩 윈도우 50).
+1. **`conversation_manager`**: 런타임 중 `agent.messages`를 **모델 컨텍스트 한도 내**로 유지 (슬라이딩 윈도우 50 **messages**).
 2. **`session_manager`**: 대화 전체와 manager 상태를 **디스크에 영속화**, Agent 생성 시 **자동 복원**.
 3. **재시작 복원**: `conversation_manager`가 session_manager를 "대신 읽는" 것이 아니라, `session_manager.initialize()`가 **메시지 + conversation_manager 상태를 함께** 복원합니다.
 4. **모델에 보이는 것**: 디스크의 전체 대화가 아니라, 복원된 `agent.messages` 중 `window_size=50`으로 trim된 최근 대화입니다.
@@ -207,6 +237,6 @@ if (
 ## 주의사항
 
 - `session_id`는 사용자/요청별로 고유해야 합니다. `default-session` fallback을 쓰면 서로 다른 요청이 같은 세션을 공유할 수 있습니다.
-- `window_size=50`이면 디스크에는 전체 대화가 저장되지만, 모델에는 최근 10턴만 전달됩니다.
+- `window_size=50`이면 디스크에는 전체 대화가 저장되지만, 모델에는 최근 **50개 메시지**만 전달됩니다.
 - `/mnt/workspace`는 AgentCore session storage 마운트가 있어야 `FileSessionManager`가 정상 동작합니다.
 - `conversation_manager`는 모듈 레벨 싱글톤이므로, **다른 session_id로 Agent를 재생성할 때** `initialize()`가 해당 세션의 `conversation_manager_state`로 덮어씁니다.
