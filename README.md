@@ -570,6 +570,8 @@ response = client.create_agent_runtime(
 
 `update_agent_runtime`에도 **동일한** `filesystemConfigurations`와 `networkConfiguration`을 포함해야 합니다. update 시 누락하면 cold start마다 세션 데이터가 사라질 수 있습니다.
 
+#### Session Manager 활용
+
 filesystemConfigurations에서 설정한 Session Storage는 runtime에서 아래처럼 Session Manager를 이용해 활용할 수 있습니다.
 
 ```python
