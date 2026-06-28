@@ -149,7 +149,6 @@ import time
 import boto3
 
 region = "us-west-2"
-account_id = "262976740991"
 project_name = "strands-runtime"
 bucket_name = f"storage-for-{project_name}-{account_id}-{region}"
 s3_bucket_arn = f"arn:aws:s3:::{bucket_name}"
