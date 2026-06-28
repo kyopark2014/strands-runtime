@@ -223,6 +223,25 @@ if (
                 └── ...
 ```
 
+### 저장된 메시지 
+
+- 사용자 요청
+
+<img width="386" height="185" alt="image" src="https://github.com/user-attachments/assets/1862dd18-a232-4314-9d1b-d9c5c504bd45" />
+
+- Tool Request
+
+<img width="453" height="448" alt="image" src="https://github.com/user-attachments/assets/84026b0b-35e0-4163-97d5-86c9bcff8b90" />
+
+- Tool Result
+
+<img width="1089" height="426" alt="image" src="https://github.com/user-attachments/assets/c26e401f-d5dd-4cbc-a0a7-d8536f1a4277" />
+
+- 최종 결과
+
+<img width="1090" height="438" alt="image" src="https://github.com/user-attachments/assets/74bbcaab-317a-4357-a15d-614767ee12a7" />
+
+
 ---
 
 ## 정리
