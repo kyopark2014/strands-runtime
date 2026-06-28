@@ -495,9 +495,11 @@ async def agent_strands(payload):
 
 AgentCore Runtime에서 context를 관리하려면 **Session Storage**를 사용합니다. 이 프로젝트는 배포 후에도 대화 이력·agent state를 유지하기 위해 **Amazon S3 Files**를 `/mnt/workspace`에 마운트하고, Strands **`FileSessionManager`**가 해당 경로에 세션을 저장합니다. (`s3_files_access_point_arn`이 없으면 managed `sessionStorage` + `PUBLIC` 모드로 fallback합니다.)
 
-### Runtime 생성 시 filesystem 설정
+### Runtime 생성 시 filesystem 활용
 
 [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)의 `create_agent_runtime_func()` / `update_agent_runtime_func()`에서 runtime을 생성·갱신할 때 `/mnt/workspace`를 마운트합니다. (`/mnt/` 하위 경로 필수)
+
+#### S3 Files를 이용하는 경우
 
 - **기본 (S3 Files)**: `s3FilesAccessPoint` + `networkMode: VPC`
 - **fallback**: `sessionStorage` + `networkMode: PUBLIC` (`s3_files_access_point_arn` 없을 때)
@@ -541,7 +543,9 @@ response = client.create_agent_runtime(
 print(response["agentRuntimeArn"])
 ```
 
-기존 managed session storage만 쓸 때의 형태는 아래와 같습니다. Version 업데이트 시 세션이 초기화될 수 있어, 운영 환경에서는 S3 Files를 권장합니다.
+#### Runtime의 Session Storage를 사용하는 경우
+
+Runtime이 가지고 있는 managed session storage만 쓸 때의 형태는 아래와 같습니다. Session Storage는 추가 요청이 없을때에도 2주간 저장되고 세션당 1G까지 저장됩니다. 다만, Runtime 재배포로 version이 업데이트되면, 세션이 초기화되므로, 세션 정보가 애플리케이션의 목적에 중요하다면, S3 Files를 권장합니다.
 
 ```python
 response = client.create_agent_runtime(
