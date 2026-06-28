@@ -244,7 +244,7 @@ if "text/event-stream" in response.get("contentType", ""):
 
 프로젝트는 **Streamlit UI(`application/`)** 와 **Strands Agent Runtime(`runtime_agent/strands/`)** 으로 나뉩니다. UI는 ECS에서 사용자 입력·MCP/Skill/Strands Tools·모델 선택·스트리밍 결과 표시만 담당하고, Agent 추론·MCP·Skill 실행은 AgentCore Runtime 컨테이너에서 수행합니다.
 
-루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base(S3 Vectors) 등 AWS 인프라를 배포하고, [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다.
+루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base(S3 Vectors)·**S3 Files 세션 스토리지** 등 AWS 인프라를 배포하고, [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다.
 
 ### `application/` — Streamlit UI (ECS)
 
@@ -491,31 +491,80 @@ async def agent_strands(payload):
 ```
 
 
-#### Session Strogage
+#### Session Storage
 
-AgentCore Runtime에서 context를 관리하기 위해 Session Strage를 활용할 수 있습니다.
+AgentCore Runtime에서 context를 관리하려면 **Session Storage**를 사용합니다. 이 프로젝트는 배포 후에도 대화 이력·agent state를 유지하기 위해 **Amazon S3 Files**를 `/mnt/workspace`에 마운트하고, Strands **`FileSessionManager`**가 해당 경로에 세션을 저장합니다. (`s3_files_access_point_arn`이 없으면 managed `sessionStorage` + `PUBLIC` 모드로 fallback합니다.)
+
+### Runtime 생성 시 filesystem 설정
+
+[runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)의 `create_agent_runtime_func()` / `update_agent_runtime_func()`에서 runtime을 생성·갱신할 때 `/mnt/workspace`를 마운트합니다. (`/mnt/` 하위 경로 필수)
+
+- **기본 (S3 Files)**: `s3FilesAccessPoint` + `networkMode: VPC`
+- **fallback**: `sessionStorage` + `networkMode: PUBLIC` (`s3_files_access_point_arn` 없을 때)
+
+아래는 **S3 Files 모드(기본)** 의 전체 `create_agent_runtime` 호출 예시입니다. `config`에는 루트 [installer.py](./installer.py)가 `application/config.json`에 기록한 S3 Files·VPC 키가 들어 있습니다.
 
 ```python
-client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
+import boto3
 
+client = boto3.client("bedrock-agentcore-control", region_name=config["region"])
+
+response = client.create_agent_runtime(
+    agentRuntimeName=runtime_name,  # 예: strands_runtime_strands
+    agentRuntimeArtifact={
+        "containerConfiguration": {
+            "containerUri": (
+                f"{config['accountId']}.dkr.ecr.{config['region']}"
+                f".amazonaws.com/{repository_name}:{image_tag}"
+            )
+        }
+    },
+    filesystemConfigurations=[
+        {
+            "s3FilesAccessPoint": {
+                "accessPointArn": config["s3_files_access_point_arn"],
+                "mountPath": "/mnt/workspace",
+            }
+        }
+    ],
+    networkConfiguration={
+        "networkMode": "VPC",
+        "networkModeConfig": {
+            "subnets": config["agent_runtime_vpc_subnets"],
+            "securityGroups": config["agent_runtime_security_groups"],
+        },
+    },
+    roleArn=config["agent_runtime_role"],
+    protocolConfiguration={"serverProtocol": "HTTP"},
+)
+
+print(response["agentRuntimeArn"])
+```
+
+기존 managed session storage만 쓸 때의 형태는 아래와 같습니다. Version 업데이트 시 세션이 초기화될 수 있어, 운영 환경에서는 S3 Files를 권장합니다.
+
+```python
 response = client.create_agent_runtime(
     agentRuntimeName=runtime_name,
     agentRuntimeArtifact={
-        'containerConfiguration': {
-            'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
+        "containerConfiguration": {
+            "containerUri": f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
         }
     },
     filesystemConfigurations=[
         {
             "sessionStorage": {
-                "mountPath": "/mnt/workspace"  # /mnt/ 하위 경로 필수
+                "mountPath": "/mnt/workspace",  # /mnt/ 하위 경로 필수
             }
         }
-    ]
-    networkConfiguration={"networkMode": "PUBLIC"}, 
-    roleArn=agent_runtime_role
+    ],
+    networkConfiguration={"networkMode": "PUBLIC"},
+    roleArn=agent_runtime_role,
+    protocolConfiguration={"serverProtocol": "HTTP"},
 )
 ```
+
+`update_agent_runtime`에도 **동일한** `filesystemConfigurations`와 `networkConfiguration`을 포함해야 합니다. update 시 누락하면 cold start마다 세션 데이터가 사라질 수 있습니다.
 
 filesystemConfigurations에서 설정한 Session Storage는 runtime에서 아래처럼 Session Manager를 이용해 활용할 수 있습니다.
 
@@ -605,16 +654,268 @@ SDK 내부에서도 함께 동작하도록 설계되어 있습니다.
 - `session_id`는 사용자/요청별로 고유하게 설정해야 합니다. 고정값(`"test-session"`)을 쓰면 모든 사용자가 같은 세션을 공유합니다.
 - `window_size=10`이면 디스크에는 전체 대화가 저장되지만, 모델에는 최근 10턴만 전달됩니다.
 - `/mnt/workspace`는 AgentCore session storage 마운트가 있어야 `FileSessionManager`가 정상 동작합니다.
+- Runtime **Version 업데이트 후에도** 세션을 유지하려면 아래 [S3 Files 활용](#s3-files-활용)을 참고하세요. 이 프로젝트는 기본적으로 S3 Files를 `/mnt/workspace`에 마운트합니다.
 
 
 
+### S3 Files 활용
 
+AgentCore의 **Managed session storage**(`sessionStorage`)는 Runtime **Version 업데이트 시 세션 데이터가 초기화**됩니다. 배포 후에도 대화 이력·agent state를 유지하려면, 이 프로젝트는 **Amazon S3 Files**를 bring-your-own 파일시스템으로 마운트해 `/mnt/workspace`에 영속 저장합니다.
 
+| 항목 | Managed `sessionStorage` | S3 Files `s3FilesAccessPoint` (현재 기본) |
+|------|--------------------------|-------------------------------------------|
+| API 키 | `sessionStorage` | `s3FilesAccessPoint` |
+| Network | `PUBLIC` | `VPC` (private subnet 필수) |
+| Version 업데이트 후 | 데이터 삭제 | **유지** |
+| 실제 저장소 | AgentCore managed | S3 bucket `agentcore-sessions/` prefix |
+| Runtime Agent 코드 | `storage_dir="/mnt/workspace"` | 동일 (변경 없음) |
 
+#### 왜 S3 Files인가
 
+- Managed storage는 stop/resume 사이클에는 유용하지만, `update_agent_runtime`으로 새 Version이 생기면 `/mnt/workspace`가 비워집니다.
+- S3 Files는 AWS 문서 기준 **Runtime Version 업데이트의 영향을 받지 않습니다**.
+- `FileSessionManager`가 쓰는 마운트 경로(`/mnt/workspace`)를 그대로 유지할 수 있어 Runtime Agent 코드 변경이 최소화됩니다.
 
+#### 전체 아키텍처
 
+```mermaid
+flowchart TB
+    subgraph root_installer ["installer.py (루트)"]
+        A[create_vpc] --> B[create_s3_files_session_storage]
+        B --> C[apply_s3_files_config → application/config.json]
+    end
 
+    subgraph s3files_aws ["S3 Files (AWS)"]
+        D[S3 bucket / agentcore-sessions/]
+        E[File System + Mount Targets]
+        F[Access Point]
+    end
+
+    subgraph runtime_installer ["runtime_agent/strands/installer.py"]
+        G[create_agent_runtime]
+        H["filesystemConfigurations: s3FilesAccessPoint"]
+        I["networkMode: VPC"]
+    end
+
+    subgraph runtime_agent ["strands_agent.py"]
+        J["FileSessionManager(storage_dir=/mnt/workspace)"]
+    end
+
+    B --> D
+    B --> E
+    B --> F
+    C --> G
+    G --> H
+    G --> I
+    H --> J
+    F --> J
+```
+
+#### 배포 흐름 (`installer.py`)
+
+루트 installer는 VPC 생성 직후 `[5.5/10] Creating S3 Files session storage` 단계에서 아래 리소스를 **멱등(idempotent)** 으로 생성합니다.
+
+1. **S3 Files sync IAM role** — `_get_or_create_s3files_sync_role()`
+   - 역할명: `role-s3files-sync-for-{project_name}`
+   - Trust principal: `elasticfilesystem.amazonaws.com` (S3 Files는 EFS NFS 레이어 공유)
+   - Inline policy: S3 bucket read/write + EventBridge sync (`DO-NOT-DELETE-S3-Files*`)
+
+2. **S3 Files file system** — `_get_or_create_s3files_file_system()`
+   - 기존 bucket ARN과 일치하는 file system이 있으면 재사용
+   - 없으면 `s3files.create_file_system()` 호출
+   - prefix: `agentcore-sessions/` (`S3_FILES_SESSION_PREFIX`)
+   - status가 `available`이 될 때까지 폴링 (`_wait_for_s3files_status`)
+
+3. **Security groups**
+   - `agent-runtime-sg-for-{project_name}`: AgentCore microVM용
+   - `s3files-mount-sg-for-{project_name}`: mount target용, **TCP 2049** ingress from runtime SG
+   - runtime SG → mount SG로 **egress 2049** 허용
+
+4. **Mount targets** — `_ensure_s3files_mount_targets()`
+   - VPC **private subnet**마다 mount target 생성 (AZ 정렬)
+   - 이미 존재하는 subnet은 건너뜀
+
+5. **Access point** — `_get_or_create_s3files_access_point()`
+   - POSIX `uid/gid: 0/0` (컨테이너 root 실행)
+   - 기존 access point가 있으면 재사용
+
+6. **File system policy** — `_ensure_s3files_file_system_policy()`
+   - AgentCore Runtime 실행 역할(`AmazonBedrockAgentCoreRuntimeRoleFor{project_name}`)에 `s3files:ClientMount` / `ClientWrite` 허용
+   - NFS 클라이언트 쓰기 거부(`Permission denied on /mnt/workspace`) 방지
+
+7. **VPC endpoint 보강** — `_add_security_group_to_vpc_endpoint()`
+   - Bedrock VPC endpoint에 agent runtime SG 추가 (VPC 모드 Runtime의 Bedrock 접근)
+
+생성 결과는 `apply_s3_files_config()`로 `application/config.json`에 기록됩니다.
+
+```json
+{
+  "s3_files_file_system_id": "fs-xxxxxxxx",
+  "s3_files_access_point_arn": "arn:aws:s3files:us-west-2:...:file-system/fs-xxx/access-point/fsap-xxx",
+  "agent_runtime_vpc_subnets": ["subnet-aaa", "subnet-bbb"],
+  "agent_runtime_security_groups": ["sg-runtime-xxx"]
+}
+```
+
+이후 `install_agent_runtime("strands")`가 `runtime_agent/strands/installer.py`를 subprocess로 실행합니다.
+
+#### AgentCore Runtime 연결 (`runtime_agent/strands/installer.py`)
+
+`application/config.json`의 S3 Files 키는 `_ensure_config_defaults()`에서 `runtime_agent/strands/config.json`으로 동기화됩니다.
+
+**저장소 모드 분기** — `s3_files_access_point_arn` 유무로 결정합니다.
+
+```python
+# runtime_agent/strands/installer.py
+
+def _uses_s3_files_session_storage(config: dict) -> bool:
+    return bool(config.get("s3_files_access_point_arn"))
+
+def session_storage_filesystem_configurations(config: dict):
+    access_point_arn = config.get("s3_files_access_point_arn")
+    if access_point_arn:
+        return [{
+            "s3FilesAccessPoint": {
+                "accessPointArn": access_point_arn,
+                "mountPath": "/mnt/workspace",
+            }
+        }]
+    # fallback: managed session storage
+    return [{"sessionStorage": {"mountPath": "/mnt/workspace"}}]
+
+def agent_runtime_network_configuration(config: dict):
+    if not _uses_s3_files_session_storage(config):
+        return {"networkMode": "PUBLIC"}
+    return {
+        "networkMode": "VPC",
+        "networkModeConfig": {
+            "subnets": config["agent_runtime_vpc_subnets"],
+            "securityGroups": config["agent_runtime_security_groups"],
+        },
+    }
+```
+
+`create_agent_runtime_func()` / `update_agent_runtime_func()`는 위 헬퍼의 결과를 [Session Storage](#session-storage) 절의 전체 `create_agent_runtime` / `update_agent_runtime` 호출에 전달합니다. 배포 로그에서 아래 메시지로 모드를 확인할 수 있습니다.
+
+```text
+Session storage: S3 Files access point at /mnt/workspace (VPC mode)
+✓ s3FilesAccessPoint verified: mountPath=/mnt/workspace, arn=arn:aws:s3files:...
+```
+
+**Agent Runtime IAM** — `create_bedrock_agentcore_policy()`에 S3 Files mount 권한이 조건부로 추가됩니다. `s3files:GetAccessPoint`는 **access point ARN**을 Resource로 지정해야 `update_agent_runtime` 시 `ValidationException`이 발생하지 않습니다. `s3files:ListMountTargets`도 Runtime 생성·갱신 검증에 필요합니다.
+
+```python
+file_system_arn = f"arn:aws:s3files:{region}:{accountId}:file-system/{file_system_id}"
+
+# Client mount/write (file system ARN + access point condition)
+{
+    "Sid": "S3FilesClientAccess",
+    "Effect": "Allow",
+    "Action": ["s3files:ClientMount", "s3files:ClientWrite"],
+    "Resource": file_system_arn,
+    "Condition": {
+        "ArnEquals": {"s3files:AccessPointArn": "{access_point_arn}"}
+    },
+}
+# GetAccessPoint (access point ARN)
+{
+    "Sid": "S3FilesGetAccessPoint",
+    "Effect": "Allow",
+    "Action": ["s3files:GetAccessPoint"],
+    "Resource": "{access_point_arn}",
+}
+# ListMountTargets (file system ARN)
+{
+    "Sid": "S3FilesListMountTargets",
+    "Effect": "Allow",
+    "Action": ["s3files:ListMountTargets"],
+    "Resource": file_system_arn,
+}
+```
+
+**S3 Files file system policy** — 루트 `installer.py`의 `_ensure_s3files_file_system_policy()`가 file system에 resource-based policy를 설정합니다. 실행 역할 IAM만으로는 NFS 쓰기가 허용되지 않을 수 있습니다.
+
+```python
+{
+    "Effect": "Allow",
+    "Principal": {
+        "AWS": "arn:aws:iam::{accountId}:role/AmazonBedrockAgentCoreRuntimeRoleFor{project_name}"
+    },
+    "Action": ["s3files:ClientMount", "s3files:ClientWrite"],
+    "Condition": {
+        "StringEquals": {"s3files:AccessPointArn": "{access_point_arn}"}
+    },
+}
+```
+
+#### Runtime Agent에서의 사용 (`strands_agent.py`)
+
+마운트 경로가 `/mnt/workspace`로 동일하므로 **Runtime Agent 코드는 변경하지 않습니다**. `create_agent()`에서 `FileSessionManager`가 세션별 디렉터리를 S3 Files 위에 기록합니다.
+
+```python
+# runtime_agent/strands/strands_agent.py
+
+session_manager = FileSessionManager(
+    session_id=get_runtime_session_id(),  # BedrockAgentCoreContext.get_session_id()
+    storage_dir="/mnt/workspace",
+)
+
+agent = Agent(
+    model=model,
+    tools=tools,
+    conversation_manager=conversation_manager,
+    session_manager=session_manager,
+)
+```
+
+디스크 구조 예시 (`session_id`별 격리):
+
+```text
+/mnt/workspace/
+  session_<runtimeSessionId>/
+    ...  # Strands SDK가 저장하는 messages, agent state
+```
+
+S3 측에는 `s3://{bucket}/agentcore-sessions/` prefix 아래에 동기화됩니다.
+
+#### Managed storage와의 비교 (요약)
+
+| 시나리오 | Managed `sessionStorage` | S3 Files |
+|----------|--------------------------|----------|
+| stop/resume (같은 Version) | 유지 | 유지 |
+| `update_agent_runtime` 후 | **초기화** | **유지** |
+| 14일 미호출 | 초기화 | 고객 관리 (별도 정책) |
+| VPC 필요 | 아니오 | **예** |
+| 세션 격리 | runtimeSessionId별 | `FileSessionManager`의 `session_<id>/` 경로 |
+
+#### 적용·재배포
+
+**전체 배포 (신규·기존 공통)**
+
+```bash
+cd strands-runtime
+python3 installer.py
+```
+
+**Runtime만 S3 Files 모드로 전환** (`application/config.json`에 S3 Files 키가 이미 있을 때)
+
+```bash
+python3 runtime_agent/strands/installer.py
+```
+
+기존 Runtime이 `PUBLIC` + `sessionStorage`로 만들어져 있다면, runtime installer 재실행 시 `update_agent_runtime`으로 S3 Files + VPC 모드로 업데이트됩니다.
+
+#### 주의사항
+
+- S3 Files는 **VPC 모드 전용**입니다. private subnet, mount target AZ 정렬, SG(2049)가 맞지 않으면 invoke 시 HTTP 424(Failed Dependency)가 발생할 수 있습니다.
+- `s3_files_access_point_arn`이 config에 없으면 installer는 **Managed `sessionStorage` + PUBLIC** 으로 fallback합니다.
+- S3 Files는 NFS 기반이므로 S3 API로 즉시 읽어야 하는 downstream에는 동기화 지연(~60초)을 고려해야 합니다. `FileSessionManager`만 사용하는 AgentCore 세션에는 일반적으로 문제 없습니다.
+- access point POSIX UID/GID는 컨테이너 실행 사용자와 일치해야 합니다. 현재 구현은 `uid/gid: 0/0`(root)입니다.
+- 세션 파일은 버킷 루트가 아니라 **`agentcore-sessions/`** prefix 아래에 동기화됩니다. 콘솔에서 prefix로 확인하세요.
+- **트러블슈팅**
+  - S3 bucket이 비어 있고 Runtime이 `PUBLIC` + `sessionStorage`이면 S3 Files 마운트가 적용되지 않은 것입니다. `python3 runtime_agent/strands/installer.py`로 Runtime을 재배포하세요.
+  - `update_agent_runtime` 시 `Ensure the role has s3files:GetAccessPoint` → 실행 역할 IAM에서 `GetAccessPoint` Resource를 access point ARN으로 분리했는지 확인하세요.
+  - `/mnt/workspace`에 `Permission denied` → `_ensure_s3files_file_system_policy()`가 적용됐는지, `s3files:ClientWrite`가 file system policy에 있는지 확인하세요.
 
 ## 배포하기
 
@@ -659,7 +960,7 @@ python3 strands-runtime/installer.py
 
 8. 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
 
-9. 인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다.
+9. 인프라가 더이상 필요없을 때에는 루트 [uninstaller.py](./uninstaller.py)를 이용해 제거합니다. AgentCore Runtime, S3 Files, VPC, ECS, Knowledge Base와 함께 `application/config.json`도 정리됩니다.
 
 ```text
 python uninstaller.py

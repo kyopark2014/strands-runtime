@@ -203,6 +203,18 @@ def _ensure_config_defaults(config: dict) -> dict:
         updated["projectName"] = project_name
         changed = True
 
+    app_config = _load_application_config()
+    for key in (
+        "s3_files_access_point_arn",
+        "s3_files_file_system_id",
+        "agent_runtime_vpc_subnets",
+        "agent_runtime_security_groups",
+    ):
+        app_value = app_config.get(key)
+        if app_value and updated.get(key) != app_value:
+            updated[key] = app_value
+            changed = True
+
     if changed:
         with open(config_path, "w", encoding="utf-8") as f:
             json.dump(updated, f, indent=2)
@@ -293,6 +305,10 @@ def update_knowledge_base_config() -> bool:
                 "vector_bucket_arn",
                 "vector_index_name",
                 "vector_index_arn",
+                "s3_files_access_point_arn",
+                "s3_files_file_system_id",
+                "agent_runtime_vpc_subnets",
+                "agent_runtime_security_groups",
             ):
                 if app_config.get(key):
                     updates[key] = app_config[key]
@@ -349,6 +365,10 @@ def update_knowledge_base_config() -> bool:
             "vector_bucket_arn",
             "vector_index_name",
             "vector_index_arn",
+            "s3_files_access_point_arn",
+            "s3_files_file_system_id",
+            "agent_runtime_vpc_subnets",
+            "agent_runtime_security_groups",
         ):
             if app_config.get(key) and not updates.get(key):
                 updates[key] = app_config[key]
@@ -389,7 +409,6 @@ def create_bedrock_agentcore_policy(config):
     policy_name = f"AmazonBedrockAgentCoreRuntimePolicyFor{projectName}"
     policy_description = f"Policy for accessing Bedrock AgentCore Runtime endpoints"
     
-    # Comprehensive policy document for Bedrock AgentCore access
     policy_document = {
         "Version": "2012-10-17",
         "Statement": [
@@ -495,6 +514,47 @@ def create_bedrock_agentcore_policy(config):
             }
         ]
     }
+
+    file_system_id = config.get("s3_files_file_system_id")
+    access_point_arn = config.get("s3_files_access_point_arn")
+    if file_system_id and access_point_arn:
+        file_system_arn = (
+            f"arn:aws:s3files:{region}:{accountId}:file-system/{file_system_id}"
+        )
+        policy_document["Statement"].extend(
+            [
+                {
+                    "Sid": "S3FilesClientAccess",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3files:ClientMount",
+                        "s3files:ClientWrite",
+                    ],
+                    "Resource": file_system_arn,
+                    "Condition": {
+                        "ArnEquals": {
+                            "s3files:AccessPointArn": access_point_arn,
+                        }
+                    },
+                },
+                {
+                    "Sid": "S3FilesGetAccessPoint",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3files:GetAccessPoint",
+                    ],
+                    "Resource": access_point_arn,
+                },
+                {
+                    "Sid": "S3FilesListMountTargets",
+                    "Effect": "Allow",
+                    "Action": [
+                        "s3files:ListMountTargets",
+                    ],
+                    "Resource": file_system_arn,
+                },
+            ]
+        )
     
     try:
         iam_client = boto3.client('iam')
@@ -1286,8 +1346,23 @@ def update_agentcore_json(agent_runtime_arn, image_tag=None):
 SESSION_STORAGE_MOUNT_PATH = "/mnt/workspace"
 
 
-def session_storage_filesystem_configurations():
-    """Managed session storage for session persistence across stop/resume."""
+def _uses_s3_files_session_storage(config: dict) -> bool:
+    return bool(config.get("s3_files_access_point_arn"))
+
+
+def session_storage_filesystem_configurations(config: dict):
+    """Filesystem mount for AgentCore session persistence."""
+    access_point_arn = config.get("s3_files_access_point_arn")
+    if access_point_arn:
+        return [
+            {
+                "s3FilesAccessPoint": {
+                    "accessPointArn": access_point_arn,
+                    "mountPath": SESSION_STORAGE_MOUNT_PATH,
+                }
+            }
+        ]
+
     return [
         {
             "sessionStorage": {
@@ -1297,20 +1372,54 @@ def session_storage_filesystem_configurations():
     ]
 
 
-def verify_session_storage_config(client, agent_runtime_id: str) -> bool:
-    """Confirm sessionStorage is configured on the agent runtime."""
+def agent_runtime_network_configuration(config: dict):
+    """Use VPC mode when S3 Files access point is configured."""
+    if not _uses_s3_files_session_storage(config):
+        return {"networkMode": "PUBLIC"}
+
+    subnets = config.get("agent_runtime_vpc_subnets") or []
+    security_groups = config.get("agent_runtime_security_groups") or []
+    if not subnets or not security_groups:
+        print(
+            "Error: s3_files_access_point_arn is set but agent_runtime_vpc_subnets "
+            "or agent_runtime_security_groups is missing."
+        )
+        return None
+
+    return {
+        "networkMode": "VPC",
+        "networkModeConfig": {
+            "subnets": subnets,
+            "securityGroups": security_groups,
+        },
+    }
+
+
+def verify_session_storage_config(client, agent_runtime_id: str, config: dict) -> bool:
+    """Confirm session storage is configured on the agent runtime."""
     response = client.get_agent_runtime(agentRuntimeId=agent_runtime_id)
     filesystem_configs = response.get("filesystemConfigurations") or []
     for cfg in filesystem_configs:
-        session_storage = cfg.get("sessionStorage") or {}
-        mount_path = session_storage.get("mountPath")
-        if mount_path == SESSION_STORAGE_MOUNT_PATH:
-            print(f"✓ sessionStorage verified: mountPath={mount_path}")
-            return True
+        if _uses_s3_files_session_storage(config):
+            s3_files = cfg.get("s3FilesAccessPoint") or {}
+            mount_path = s3_files.get("mountPath")
+            if mount_path == SESSION_STORAGE_MOUNT_PATH:
+                print(
+                    "✓ s3FilesAccessPoint verified: "
+                    f"mountPath={mount_path}, arn={s3_files.get('accessPointArn')}"
+                )
+                return True
+        else:
+            session_storage = cfg.get("sessionStorage") or {}
+            mount_path = session_storage.get("mountPath")
+            if mount_path == SESSION_STORAGE_MOUNT_PATH:
+                print(f"✓ sessionStorage verified: mountPath={mount_path}")
+                return True
 
+    storage_type = "s3FilesAccessPoint" if _uses_s3_files_session_storage(config) else "sessionStorage"
     print(
-        "⚠ sessionStorage not found in filesystemConfigurations. "
-        "Cold start may not restore /mnt/workspace session data."
+        f"⚠ {storage_type} not found in filesystemConfigurations. "
+        f"Cold start may not restore {SESSION_STORAGE_MOUNT_PATH} session data."
     )
     print(f"  filesystemConfigurations: {filesystem_configs or None}")
     return False
@@ -1332,6 +1441,9 @@ def create_agent_runtime_func(config, repository_name, image_tag):
     
     try:
         client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
+        network_configuration = agent_runtime_network_configuration(config)
+        if network_configuration is None:
+            return None
         
         response = client.create_agent_runtime(
             agentRuntimeName=runtime_name,
@@ -1340,8 +1452,8 @@ def create_agent_runtime_func(config, repository_name, image_tag):
                     'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
                 }
             },
-            filesystemConfigurations=session_storage_filesystem_configurations(),
-            networkConfiguration={"networkMode": "PUBLIC"}, 
+            filesystemConfigurations=session_storage_filesystem_configurations(config),
+            networkConfiguration=network_configuration,
             roleArn=agent_runtime_role
         )
         
@@ -1373,6 +1485,9 @@ def update_agent_runtime_func(config, repository_name, agent_runtime_id, image_t
     
     try:
         client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
+        network_configuration = agent_runtime_network_configuration(config)
+        if network_configuration is None:
+            return None
         
         response = client.update_agent_runtime(
             agentRuntimeId=agent_runtime_id,
@@ -1382,9 +1497,9 @@ def update_agent_runtime_func(config, repository_name, agent_runtime_id, image_t
                     'containerUri': f"{account_id}.dkr.ecr.{aws_region}.amazonaws.com/{repository_name}:{image_tag}"
                 }
             },
-            filesystemConfigurations=session_storage_filesystem_configurations(),
+            filesystemConfigurations=session_storage_filesystem_configurations(config),
             roleArn=agent_runtime_role,
-            networkConfiguration={"networkMode": "PUBLIC"},
+            networkConfiguration=network_configuration,
             protocolConfiguration={"serverProtocol": "HTTP"}
         )
         
@@ -1423,6 +1538,10 @@ def create_agent_runtime():
             return False
         
         print(f"Using image tag: {image_tag}")
+        if _uses_s3_files_session_storage(config):
+            print("Session storage: S3 Files access point at /mnt/workspace (VPC mode)")
+        else:
+            print("Session storage: managed sessionStorage at /mnt/workspace (PUBLIC mode)")
         
         # Check if agent runtime already exists
         client = boto3.client('bedrock-agentcore-control', region_name=aws_region)
@@ -1456,7 +1575,7 @@ def create_agent_runtime():
             resolved_runtime_id = agent_runtime_arn.rsplit("/", 1)[-1]
 
         if resolved_runtime_id:
-            verify_session_storage_config(client, resolved_runtime_id)
+            verify_session_storage_config(client, resolved_runtime_id, config)
         
         # Update config.json
         update_agentcore_json(agent_runtime_arn, image_tag)
