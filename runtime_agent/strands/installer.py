@@ -1289,6 +1289,11 @@ def push_to_ecr(*, skip_docker_build: bool = False, image_tag: Optional[str] = N
 # Agent Runtime Creation/Update Functions
 # ============================================================================
 
+def agent_runtime_name(runtime_type: str) -> str:
+    """Return Bedrock AgentCore runtime name (e.g. runtime_strands)."""
+    return f"runtime_{runtime_type.replace('-', '_')}"
+
+
 def get_latest_image_tag(config):
     """Get the latest image tag from ECR."""
     try:
@@ -1436,8 +1441,8 @@ def create_agent_runtime_func(config, repository_name, image_tag):
         print("Error: agent_runtime_role not found in config.json")
         return None
     
-    # Replace hyphens with underscores for agent runtime name (AWS validation requirement)
-    runtime_name = repository_name.replace('-', '_')
+    runtime_type = repository_name.rsplit("_", 1)[-1]
+    runtime_name = agent_runtime_name(runtime_type)
     print(f"Creating agent runtime: {runtime_name}")
     
     try:
@@ -1525,9 +1530,7 @@ def create_agent_runtime():
         # Get current folder name
         current_folder_name = os.path.basename(os.getcwd())
         repository_name = f"{project_name}_{current_folder_name}"
-        
-        # Replace hyphens with underscores for agent runtime name (AWS validation requirement)
-        runtime_name = repository_name.replace('-', '_')
+        runtime_name = agent_runtime_name(current_folder_name)
         
         print(f"Repository name: {repository_name}")
         print(f"Runtime name: {runtime_name}")
