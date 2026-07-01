@@ -52,6 +52,19 @@ def update(modelName):
         logger.info(f"model_id: {model_id}")
         logger.info(f"model_type: {model_type}")
 
+def is_fable_model(model_id: str | None = None) -> bool:
+    if not model_id:
+        model_id = globals().get("model_id", "")
+    return "fable" in model_id.lower()
+
+
+def uses_adaptive_thinking(model_id: str | None = None) -> bool:
+    if not model_id:
+        model_id = globals().get("model_id", "")
+    model_id = model_id.lower()
+    return "fable" in model_id or "claude-sonnet-5" in model_id
+
+
 def get_chat(extended_thinking=None):
     # Set default value if not provided or invalid
     if extended_thinking is None or extended_thinking not in ['Enable', 'Disable']:
@@ -78,7 +91,7 @@ def get_chat(extended_thinking=None):
         )
     )
     
-    if extended_thinking=='Enable':
+    if extended_thinking=='Enable' and not uses_adaptive_thinking(modelId):
         maxReasoningOutputTokens=64000
         logger.info(f"extended_thinking: {extended_thinking}")
         thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
@@ -95,10 +108,11 @@ def get_chat(extended_thinking=None):
     else:
         parameters = {
             "max_tokens":maxOutputTokens,     
-            "temperature":0.1,
-            "top_k":250,
             "stop_sequences": [STOP_SEQUENCE]
         }
+        if not is_fable_model(modelId) and not uses_adaptive_thinking(modelId):
+            parameters["temperature"] = 0.1
+            parameters["top_k"] = 250
 
     chat = ChatBedrock(   # new chat model
         model_id=modelId,

@@ -1,5 +1,6 @@
 import utils
 import info
+import bedrock_data_retention
 import boto3
 import traceback
 import uuid
@@ -98,8 +99,25 @@ aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
 aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
 aws_region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
 
+def is_fable_model(model_id: str | None = None) -> bool:
+    if not model_id:
+        model_id = globals().get("model_id", "")
+    return "fable" in model_id.lower()
+
+
+def uses_adaptive_thinking(model_id: str | None = None) -> bool:
+    if not model_id:
+        model_id = globals().get("model_id", "")
+    model_id = model_id.lower()
+    return "fable" in model_id or "claude-sonnet-5" in model_id
+
+
 def get_max_output_tokens(model_id: str = "") -> int:
     """Return the max output tokens based on the model ID."""
+    if is_fable_model(model_id):
+        return 128000
+    if "claude-sonnet-5" in model_id:
+        return 128000
     if "claude-opus-4-6" in model_id:
         return 128000
     if "claude-opus-4-5" in model_id:
@@ -118,7 +136,7 @@ def update(
     skillMode=None,
 ):
     global model_name, model_id, model_type, reasoning_mode, debug_mode, skill_mode
-    global models, user_id
+    global models, user_id, bedrock_region
 
     if userId is not None and userId != user_id:
         user_id = userId
@@ -129,8 +147,10 @@ def update(
         model_name = modelName
         logger.info(f"model_name: {model_name}")
         models = info.get_model_info(model_name)
-        model_id = models[0]["model_id"]
-        model_type = models[0]["model_type"]
+        if models:
+            model_id = models[0]["model_id"]
+            model_type = models[0]["model_type"]
+            bedrock_region = models[0]["bedrock_region"]
 
     if reasoningMode is not None and reasoningMode != reasoning_mode:
         reasoning_mode = reasoningMode
@@ -312,6 +332,12 @@ def get_chat(extended_thinking):
     
     logger.info(f"LLM: bedrock_region: {bedrock_region}, modelId: {model_id}, model_type: {model_type}")
 
+    if "fable" in model_id.lower():
+        bedrock_data_retention.ensure_fable_data_retention(
+            model_id,
+            bedrock_region=bedrock_region,
+        )
+
     if model_type == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
     elif model_type == 'claude':
@@ -347,7 +373,7 @@ def get_chat(extended_thinking):
                 }
             )
         )
-    if extended_thinking=='Enable':
+    if model_type != 'openai' and extended_thinking == 'Enable' and not uses_adaptive_thinking(model_id):
         maxReasoningOutputTokens=64000
         logger.info(f"extended_thinking: {extended_thinking}")
         thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
@@ -359,6 +385,19 @@ def get_chat(extended_thinking):
                 "budget_tokens": thinking_budget
             },
             "stop_sequences": [STOP_SEQUENCE]
+        }
+    elif model_type != 'openai' and extended_thinking == 'Disable':
+        parameters = {
+            "max_tokens":maxOutputTokens,     
+            "stop_sequences": [STOP_SEQUENCE]
+        }
+        if not uses_adaptive_thinking(model_id):
+            parameters["temperature"] = 0.1
+            parameters["top_k"] = 250
+    elif model_type != 'openai' and uses_adaptive_thinking(model_id):
+        parameters = {
+            "max_tokens": maxOutputTokens,
+            "stop_sequences": [STOP_SEQUENCE],
         }
     else:
         parameters = {
@@ -704,6 +743,12 @@ def general_conversation(query):
     if memory_chain is None:
         initiate()  # Initialize memory_chain
 
+    if "fable" in model_id.lower():
+        bedrock_data_retention.ensure_fable_data_retention(
+            model_id,
+            bedrock_region=bedrock_region,
+        )
+
     system_prompt = (
         "당신의 이름은 서연이고, 질문에 대해 친절하게 답변하는 사려깊은 인공지능 도우미입니다."
         "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다." 
@@ -746,7 +791,7 @@ def general_conversation(query):
         maxOutputTokens = 5120
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
     
-    if reasoning_mode == 'Enable':
+    if reasoning_mode == 'Enable' and not uses_adaptive_thinking(model_id):
         maxReasoningOutputTokens = 64000
         thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
         parameters = {
@@ -761,10 +806,11 @@ def general_conversation(query):
     else:
         parameters = {
             "max_tokens": maxOutputTokens,
-            "temperature": 0.1,
-            "top_k": 250,
             "stop_sequences": [STOP_SEQUENCE]
         }
+        if not is_fable_model(model_id) and not uses_adaptive_thinking(model_id):
+            parameters["temperature"] = 0.1
+            parameters["top_k"] = 250
     
     def stream_generator():
         try:
@@ -773,13 +819,16 @@ def general_conversation(query):
                 request_body = {
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": parameters["max_tokens"],
-                    "temperature": parameters.get("temperature", 0.1),
-                    "top_k": parameters.get("top_k", 250),
-                    "top_p": parameters.get("top_p", 0.9),
                     "stop_sequences": parameters.get("stop_sequences", []),
                     "system": system_prompt,
                     "messages": messages
                 }
+                if "temperature" in parameters:
+                    request_body["temperature"] = parameters["temperature"]
+                if "top_k" in parameters:
+                    request_body["top_k"] = parameters["top_k"]
+                if "top_p" in parameters:
+                    request_body["top_p"] = parameters["top_p"]
                 
                 if "thinking" in parameters:
                     request_body["thinking"] = parameters["thinking"]
@@ -787,10 +836,11 @@ def general_conversation(query):
                 # Other model format
                 request_body = {
                     "max_tokens": parameters["max_tokens"],
-                    "temperature": parameters.get("temperature", 0.1),
                     "system": system_prompt,
                     "messages": messages
                 }
+                if "temperature" in parameters:
+                    request_body["temperature"] = parameters["temperature"]
             
             # Call streaming response
             response = bedrock_client.invoke_model_with_response_stream(
@@ -958,6 +1008,12 @@ def run_rag_with_knowledge_base(query, st):
     # change format to document
     st.info(f"{len(relevant_docs)}개의 관련된 문서를 얻었습니다.")
 
+    if "fable" in model_id.lower():
+        bedrock_data_retention.ensure_fable_data_retention(
+            model_id,
+            bedrock_region=bedrock_region,
+        )
+
     # Create bedrock client
     bedrock_client = boto3.client(
         service_name='bedrock-runtime',
@@ -993,7 +1049,7 @@ def run_rag_with_knowledge_base(query, st):
         maxOutputTokens = 5120
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
     
-    if reasoning_mode == 'Enable':
+    if reasoning_mode == 'Enable' and not uses_adaptive_thinking(model_id):
         maxReasoningOutputTokens = 64000
         thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
         parameters = {
@@ -1008,11 +1064,12 @@ def run_rag_with_knowledge_base(query, st):
     else:
         parameters = {
             "max_tokens": maxOutputTokens,
-            "temperature": 0.1,
-            "top_k": 250,
-            "top_p": 0.9,
             "stop_sequences": [STOP_SEQUENCE]
         }
+        if not is_fable_model(model_id) and not uses_adaptive_thinking(model_id):
+            parameters["temperature"] = 0.1
+            parameters["top_k"] = 250
+            parameters["top_p"] = 0.9
     
     # Call Bedrock API
     msg = ""    
@@ -1022,9 +1079,6 @@ def run_rag_with_knowledge_base(query, st):
             request_body = {
                 "anthropic_version": "bedrock-2023-05-31",
                 "max_tokens": parameters["max_tokens"],
-                "temperature": parameters.get("temperature", 0.1),
-                "top_k": parameters.get("top_k", 250),
-                "top_p": parameters.get("top_p", 0.9),
                 "stop_sequences": parameters.get("stop_sequences", []),
                 "system": system_prompt,
                 "messages": [
@@ -1034,6 +1088,12 @@ def run_rag_with_knowledge_base(query, st):
                     }
                 ]
             }
+            if "temperature" in parameters:
+                request_body["temperature"] = parameters["temperature"]
+            if "top_k" in parameters:
+                request_body["top_k"] = parameters["top_k"]
+            if "top_p" in parameters:
+                request_body["top_p"] = parameters["top_p"]
             
             if "thinking" in parameters:
                 request_body["thinking"] = parameters["thinking"]
@@ -1041,7 +1101,6 @@ def run_rag_with_knowledge_base(query, st):
             # Other model format (modify if needed)
             request_body = {
                 "max_tokens": parameters["max_tokens"],
-                "temperature": parameters.get("temperature", 0.1),
                 "system": system_prompt,
                 "messages": [
                     {
@@ -1050,6 +1109,8 @@ def run_rag_with_knowledge_base(query, st):
                     }
                 ]
             }
+            if "temperature" in parameters:
+                request_body["temperature"] = parameters["temperature"]
         
         response = bedrock_client.invoke_model(
             modelId=model_id,
