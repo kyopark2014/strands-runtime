@@ -6135,6 +6135,13 @@ def main():
         # Install AgentCore runtime after CloudFront so config.json gets sharing_url
         install_agent_runtime("strands")
         logger.info("Strands agent runtime installed...")
+        # Runtime installer writes agent_runtime_arn; merge into ECS env before deploy
+        app_environment = _merge_runtime_agent_settings(app_environment)
+        if write_application_config(app_environment):
+            logger.info(
+                "✓ Merged agent_runtime_arn into application config for ECS: "
+                f"{app_environment.get('agent_runtime_arn', '')}"
+            )
 
         repository_uri = create_ecr_repository()
         image_build_tag = None

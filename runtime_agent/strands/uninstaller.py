@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Unified uninstallation script
-Sequentially deletes: AgentCore runtime -> ECR repository -> IAM role -> IAM policy
+Sequentially deletes: CloudWatch dashboards -> AgentCore runtime -> ECR repository -> IAM role -> IAM policy
 All functionality integrated into a single file
 """
 
@@ -574,6 +574,70 @@ def delete_local_config():
         return False
 
 
+def _monitoring_dashboard_name(config: dict) -> str:
+    """Resolve project monitoring dashboard name from config or projectName."""
+    name = config.get("cloudwatch_dashboard_name")
+    if name:
+        return name
+    project_name = config.get("projectName", "strands-runtime")
+    try:
+        from cloudwatch_metrics import dashboard_name
+
+        return dashboard_name(project_name)
+    except Exception:
+        return f"{str(project_name).replace(' ', '-')}-monitoring"
+
+
+def _delete_dashboard(client, name: str) -> bool:
+    """Delete a single CloudWatch dashboard. Returns True if deleted or already gone."""
+    if not name:
+        return True
+    try:
+        client.delete_dashboards(DashboardNames=[name])
+        print(f"✓ Deleted CloudWatch dashboard: {name}")
+        return True
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code in ("ResourceNotFound", "ResourceNotFoundException"):
+            print(f"CloudWatch dashboard not found (already deleted): {name}")
+            return True
+        # delete_dashboards returns 200 even when some names are missing; other errors surface here
+        print(f"Warning: Failed to delete dashboard '{name}': {e}")
+        return False
+    except Exception as e:
+        print(f"Warning: Failed to delete dashboard '{name}': {e}")
+        return False
+
+
+def delete_cloudwatch_dashboards():
+    """Delete CloudWatch monitoring dashboard created by the Strands runtime installer.
+
+    Only removes the project-specific dashboard ({projectName}-monitoring).
+    Bedrock-Usage-Dashboard is shared across runtimes and is left intact.
+    """
+    print(f"\n{'='*60}")
+    print("Deleting CloudWatch dashboards")
+    print(f"{'='*60}")
+
+    try:
+        config = load_config()
+        if not config:
+            print("Warning: config.json not found; skipping dashboard deletion")
+            return True
+
+        region = _resolve_region(config)
+        client = boto3.client("cloudwatch", region_name=region)
+
+        project_dashboard = _monitoring_dashboard_name(config)
+        _delete_dashboard(client, project_dashboard)
+
+        print("\n✓ CloudWatch dashboard deletion completed")
+        return True
+    except Exception as e:
+        print(f"Warning: Error deleting CloudWatch dashboards: {e}")
+        return True
+
+
 # ============================================================================
 # Main Function
 # ============================================================================
@@ -616,6 +680,7 @@ def main():
     
     # Execute each step in reverse order
     steps = [
+        ("Deleting CloudWatch dashboards", delete_cloudwatch_dashboards),
         ("Deleting AgentCore runtime", delete_agent_runtime),
         ("Deleting ECR repository", delete_ecr_repository),
         ("Deleting IAM role and policy", delete_iam_resources),

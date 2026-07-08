@@ -182,6 +182,23 @@ async def agent_strands(payload):
                     logger.info(f"[result] {text}")
                     final_output = {"messages": text, "image_url": image_urls}
 
+                try:
+                    import cloudwatch_metrics
+
+                    usage = cloudwatch_metrics.extract_token_usage(final)
+                    if not usage:
+                        metrics = getattr(final, "metrics", None)
+                        logger.warning(
+                            "Token usage missing on AgentResult; CloudWatch metrics skipped "
+                            "(model=%s accumulated_usage=%s)",
+                            chat.model_id,
+                            getattr(metrics, "accumulated_usage", None) if metrics else None,
+                        )
+                    else:
+                        cloudwatch_metrics.publish_token_metrics(chat.model_id, final)
+                except Exception as metric_err:
+                    logger.warning(f"CloudWatch token metrics publish skipped: {metric_err}")
+
             elif "current_tool_use" in event:
                 current_tool_use = event["current_tool_use"]
                 name = current_tool_use.get("name", "")
