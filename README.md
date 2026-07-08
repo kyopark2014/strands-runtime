@@ -1192,6 +1192,76 @@ if __name__ == "__main__":
 <img width="720" height="706" alt="image" src="https://github.com/user-attachments/assets/fb5eb40e-720e-420f-ad3b-8aafceab236e" />
 
 
+## Guardrail
+
+`installer.py`가 Amazon Bedrock Guardrail을 자동으로 생성·업데이트합니다. 사용자 입력에서 **성적 표현**과 **프롬프트 공격**(jailbreak, prompt injection)을 차단합니다.
+
+### 설치 시 동작
+
+`python installer.py` 실행 시 아래 순서로 Guardrail이 처리됩니다.
+
+1. IAM 정책·역할 생성
+2. **Bedrock Guardrail 생성/업데이트** (`create_bedrock_guardrail`)
+3. Docker 이미지 빌드 및 ECR 푸시
+4. AgentCore Runtime 생성/업데이트
+
+동일 이름의 Guardrail이 이미 있으면 `update_guardrail`로 정책을 갱신하고, 없으면 `create_guardrail`로 새로 만듭니다.
+
+### 콘텐츠 필터 정책
+
+| 필터 | 입력 | 출력 | 동작 |
+|------|------|------|------|
+| `SEXUAL` | HIGH | HIGH | 성적 표현이 포함된 질문·응답 차단 |
+| `PROMPT_ATTACK` | HIGH | NONE | jailbreak·프롬프트 인젝션 차단 (입력 전용) |
+
+### config.json 저장 항목
+
+| 키 | 설명 |
+|----|------|
+| `guardrail_id` | Guardrail ID |
+| `guardrail_version` | Guardrail 버전 (`DRAFT`) |
+| `guardrail_arn` | Guardrail ARN |
+| `guardrail_name` | `guardrail-for-{projectName}` 형식의 이름 |
+
+### IAM 권한
+
+AgentCore Runtime 역할에 `bedrock:GetGuardrail`, `bedrock:ListGuardrails`, `bedrock:ApplyGuardrail` 권한이 추가됩니다.
+
+### 추론 시 Guardrail 적용
+
+Streamlit UI(`application/app.py`)의 **Guardrail 사용** 토글로 on/off를 제어하고, `guardrail_enabled` 값이 AgentCore payload로 Runtime에 전달됩니다.
+
+| 모델 | 적용 방식 | 설명 |
+|------|-----------|------|
+| Claude / Nova | `BedrockModel` + `guardrail_id` | Strands SDK가 Converse API Guardrail로 입력·출력 검사 |
+| OpenAI 등 | `check_input_guardrail()` + `apply_guardrail` | 모델 호출 전 입력만 사전 검사 |
+
+#### Claude / Nova: Strands BedrockModel Guardrail
+
+`strands_agent.get_model()`에서 Guardrail이 활성화되고 모델 타입이 Claude 또는 Nova이면, `BedrockModel` 생성 시 `guardrail_id`, `guardrail_version`, `guardrail_trace`를 전달합니다.
+
+```python
+guardrail_kwargs = chat.get_bedrock_model_guardrail_kwargs(model_type)
+model = BedrockModel(
+    boto_session=boto_session,
+    model_id=model_id,
+    max_tokens=maxOutputTokens,
+    **guardrail_kwargs,
+)
+```
+
+#### OpenAI 등: 입력 사전 검사
+
+`agent.py`에서 에이전트 실행 전 `chat.check_input_guardrail()`을 호출합니다. 차단되면 모델 호출 없이 안내 메시지를 반환합니다.
+
+```python
+if query and chat.guardrail_enabled and not chat.uses_converse_guardrail():
+    blocked, blocked_message = chat.check_input_guardrail(query)
+    if blocked:
+        yield {"result": {"messages": [{"role": "assistant", "content": blocked_message}], "image_url": []}}
+        return
+```
+
 
 ## Reference 
 

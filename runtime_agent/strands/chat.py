@@ -16,6 +16,7 @@ import json
 from botocore.config import Config
 from urllib import parse
 from langchain_aws import ChatBedrock
+from langchain_aws import ChatBedrockConverse
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from io import BytesIO
@@ -88,6 +89,7 @@ model_type = models[0]["model_type"]
 bedrock_region = config.get("region", "us-west-2")
 reasoning_mode = 'Disable'
 skill_mode = 'Disable'
+guardrail_enabled = True
 
 # Memory related variables
 MSG_LENGTH = 100
@@ -134,9 +136,10 @@ def update(
     debugMode=None,
     reasoningMode=None,
     skillMode=None,
+    guardrailEnabled=None,
 ):
     global model_name, model_id, model_type, reasoning_mode, debug_mode, skill_mode
-    global models, user_id, bedrock_region
+    global models, user_id, bedrock_region, guardrail_enabled
 
     if userId is not None and userId != user_id:
         user_id = userId
@@ -163,6 +166,72 @@ def update(
     if skillMode is not None and skillMode != skill_mode:
         skill_mode = skillMode
         logger.info(f"skill_mode: {skill_mode}")
+
+    if guardrailEnabled is not None and guardrail_enabled != guardrailEnabled:
+        guardrail_enabled = guardrailEnabled
+        logger.info(f"guardrail_enabled: {guardrail_enabled}")
+
+def _guardrail_config() -> dict | None:
+    if not guardrail_enabled:
+        return None
+    runtime_config = config or utils.load_config()
+    guardrail_id = runtime_config.get("guardrail_id")
+    if not guardrail_id:
+        return None
+    return {
+        "guardrailIdentifier": guardrail_id,
+        "guardrailVersion": runtime_config.get("guardrail_version", "DRAFT"),
+        "trace": "enabled",
+    }
+
+
+def uses_converse_guardrail() -> bool:
+    return bool(_guardrail_config() and model_type in ("claude", "nova"))
+
+
+def get_bedrock_model_guardrail_kwargs(model_type_value: str | None = None) -> dict:
+    """Return BedrockModel guardrail kwargs for Strands SDK."""
+    model_type_value = model_type_value or model_type
+    guardrail_cfg = _guardrail_config()
+    if not guardrail_cfg or model_type_value not in ("claude", "nova"):
+        return {}
+    return {
+        "guardrail_id": guardrail_cfg["guardrailIdentifier"],
+        "guardrail_version": guardrail_cfg["guardrailVersion"],
+        "guardrail_trace": "enabled",
+    }
+
+
+def check_input_guardrail(text: str) -> tuple[bool, str]:
+    """Return (blocked, message). When blocked, message is the guardrail response."""
+    guardrail_cfg = _guardrail_config()
+    if not guardrail_cfg or not text:
+        return False, text
+
+    try:
+        client = boto3.client("bedrock-runtime", region_name=bedrock_region)
+        response = client.apply_guardrail(
+            guardrailIdentifier=guardrail_cfg["guardrailIdentifier"],
+            guardrailVersion=guardrail_cfg["guardrailVersion"],
+            source="INPUT",
+            content=[{"text": {"text": text}}],
+        )
+        if response.get("action") == "GUARDRAIL_INTERVENED":
+            logger.info("Guardrail blocked user input")
+            for output in response.get("outputs", []):
+                text_output = output.get("text", {})
+                if text_output.get("text"):
+                    return True, text_output["text"]
+            return (
+                True,
+                "요청이 안전 정책에 의해 차단되었습니다. "
+                "성적 표현 또는 프롬프트 공격이 감지되었습니다.",
+            )
+    except ClientError as e:
+        logger.error(f"apply_guardrail failed: {e}")
+    except Exception as e:
+        logger.error(f"apply_guardrail failed: {e}")
+    return False, text
 
 def create_object(key, body):
     """
@@ -337,6 +406,43 @@ def get_chat(extended_thinking):
             model_id,
             bedrock_region=bedrock_region,
         )
+
+    guardrail_cfg = _guardrail_config()
+    if guardrail_cfg and model_type in ("claude", "nova"):
+        if aws_access_key and aws_secret_key:
+            boto3_bedrock = boto3.client(
+                service_name="bedrock-runtime",
+                region_name=bedrock_region,
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                aws_session_token=aws_session_token,
+                config=Config(
+                    retries={"max_attempts": 30},
+                    read_timeout=300,
+                ),
+            )
+        else:
+            boto3_bedrock = boto3.client(
+                service_name="bedrock-runtime",
+                region_name=bedrock_region,
+                config=Config(
+                    retries={"max_attempts": 30},
+                    read_timeout=300,
+                ),
+            )
+        converse_kwargs = {
+            "model_id": model_id,
+            "client": boto3_bedrock,
+            "max_tokens": maxOutputTokens,
+            "temperature": 0.1,
+            "region_name": bedrock_region,
+            "guardrail_config": guardrail_cfg,
+        }
+        if model_type == "claude":
+            converse_kwargs["provider"] = "anthropic"
+        converse_chat = ChatBedrockConverse(**converse_kwargs)
+        converse_chat.streaming = False
+        return converse_chat
 
     if model_type == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'

@@ -651,6 +651,7 @@ def get_model():
         )
 
     adaptive_thinking = chat.uses_adaptive_thinking(model_id)
+    guardrail_kwargs = chat.get_bedrock_model_guardrail_kwargs(model_type)
 
     if chat.reasoning_mode == "Enable" and model_type != "openai" and not adaptive_thinking:
         model = BedrockModel(
@@ -666,6 +667,7 @@ def get_model():
                     "budget_tokens": thinking_budget,
                 }
             },
+            **guardrail_kwargs,
         )
     elif chat.reasoning_mode == "Disable" and model_type != "openai" and not adaptive_thinking:
         model = BedrockModel(
@@ -680,6 +682,7 @@ def get_model():
                     "type": "disabled"
                 }
             },
+            **guardrail_kwargs,
         )
     elif model_type != "openai" and adaptive_thinking:
         model = BedrockModel(
@@ -688,6 +691,7 @@ def get_model():
             model_id=model_id,
             max_tokens=maxOutputTokens,
             stop_sequences=[STOP_SEQUENCE],
+            **guardrail_kwargs,
         )
     elif model_type == "openai":
         model = _build_mantle_openai_model(profile, boto_session, maxOutputTokens)
@@ -1164,6 +1168,7 @@ selected_mcp_servers = []
 selected_skill_list = []
 selected_skill_mode = None
 selected_session_id = None
+selected_guardrail_enabled = None
 agent = None
 
 async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: list[str], skill_list: list[str], notification_queue):
@@ -1174,7 +1179,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id, selected_guardrail_enabled
 
     current_skill_mode = chat.skill_mode
     current_session_id = get_runtime_session_id()
@@ -1184,6 +1189,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         or selected_skill_list != skill_list
         or selected_skill_mode != current_skill_mode
         or selected_session_id != current_session_id
+        or selected_guardrail_enabled != chat.guardrail_enabled
         or agent is None
     ):
         selected_strands_tools = list(strands_tools)
@@ -1191,6 +1197,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         selected_skill_list = list(skill_list)
         selected_skill_mode = current_skill_mode
         selected_session_id = current_session_id
+        selected_guardrail_enabled = chat.guardrail_enabled
         
         mcp_manager.stop_agent_clients()
         

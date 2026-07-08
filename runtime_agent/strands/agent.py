@@ -133,7 +133,20 @@ async def agent_strands(payload):
         debugMode=payload.get("debug_mode", chat.debug_mode),
         reasoningMode=payload.get("reasoning_mode", chat.reasoning_mode),
         skillMode=skill_mode,
+        guardrailEnabled=payload.get("guardrail_enabled"),
     )
+    logger.info(f"guardrail_enabled: {chat.guardrail_enabled}")
+
+    if query and chat.guardrail_enabled and not chat.uses_converse_guardrail():
+        blocked, blocked_message = chat.check_input_guardrail(query)
+        if blocked:
+            yield {
+                "result": {
+                    "messages": [{"role": "assistant", "content": blocked_message}],
+                    "image_url": [],
+                }
+            }
+            return
 
     needs_agent = (
         strands_agent.selected_strands_tools != strands_tools
@@ -141,6 +154,7 @@ async def agent_strands(payload):
         or strands_agent.selected_skill_list != skill_list
         or strands_agent.selected_skill_mode != skill_mode
         or strands_agent.selected_session_id != strands_agent.get_runtime_session_id()
+        or strands_agent.selected_guardrail_enabled != chat.guardrail_enabled
         or strands_agent.agent is None
     )
     if needs_agent:
@@ -149,6 +163,7 @@ async def agent_strands(payload):
         strands_agent.selected_skill_list = list(skill_list)
         strands_agent.selected_skill_mode = skill_mode
         strands_agent.selected_session_id = strands_agent.get_runtime_session_id()
+        strands_agent.selected_guardrail_enabled = chat.guardrail_enabled
 
         strands_agent.mcp_manager.stop_agent_clients()
         strands_agent.agent = strands_agent.create_agent(
