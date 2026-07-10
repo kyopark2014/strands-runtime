@@ -13,7 +13,7 @@ WORKDIR /app
 
 RUN pip install boto3 botocore --upgrade
 RUN pip install mcp
-RUN pip install "strands-agents[openai]>=1.44.0" "strands-agents-tools>=0.8.1"
+RUN pip install "strands-agents[openai,otel]>=1.44.0" "strands-agents-tools>=0.8.1"
 RUN pip install bedrock-agentcore uv
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
@@ -23,7 +23,7 @@ RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datarea
 RUN npm install docx pptxgenjs
 ENV NODE_PATH=/app/node_modules
 
-# OpenTelemetry
+# OpenTelemetry (ADOT + Strands telemetry for AgentCore Evaluations)
 RUN pip install aws-opentelemetry-distro>=0.10.0
 
 COPY . .
@@ -31,6 +31,10 @@ COPY . .
 ENV PYTHONPATH=/app
 ENV ALLOW_MISSING_RAG_CONFIG=1
 ENV BYPASS_TOOL_CONSENT=true
+ENV OTEL_PYTHON_DISTRO=aws_distro
+ENV OTEL_PYTHON_CONFIGURATOR=aws_configurator
+ENV OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
+ENV OTEL_RESOURCE_ATTRIBUTES=service.name=runtime_strands.DEFAULT
 
 EXPOSE 8080
 

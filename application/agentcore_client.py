@@ -559,7 +559,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         "history_mode": history_mode,
         "skill_list": skill_list or [],
         "strands_tools": strands_tools or [],
-        "guardrail_enabled": guardrail_enabled if guardrail_enabled is not None else config.get("guardrail_enabled", True),
+        "guardrail_enabled": bool(guardrail_enabled) if guardrail_enabled is not None else True,
     })
 
     destination = f"http://localhost:8080/invocations"
@@ -771,7 +771,7 @@ def run_agent(prompt, user_id, history_mode, mcp_servers, model_name, notificati
         "history_mode": history_mode,
         "skill_list": skill_list or [],
         "strands_tools": strands_tools or [],
-        "guardrail_enabled": guardrail_enabled if guardrail_enabled is not None else config.get("guardrail_enabled", True),
+        "guardrail_enabled": bool(guardrail_enabled) if guardrail_enabled is not None else True,
     })
 
     agent_type = "strands"
