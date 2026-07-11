@@ -49,19 +49,20 @@ async def main():
     print(f"runtime_session_id: {runtime_session_id}")
 
     prompt = "서울 날씨는?"
-    mcp_servers = ["tavily", "web_fetch"]
-    skill_list = ["skill-creator", "kma-weather"]
+    mcp_servers = ["websearch", "web_fetch"]
+    skill_list = ["skill-creator"]
+    strands_tools = ["current_time", "file_read", "file_write"]
     model_name = "Claude 4.5 Haiku"
     user_id = target
-    history_mode = "Disable"
 
     payload = json.dumps({
         "prompt": prompt,
         "mcp_servers": mcp_servers,
         "model_name": model_name,
         "user_id": user_id,
-        "history_mode": history_mode,
+        "runtime_session_id": runtime_session_id,
         "skill_list": skill_list,
+        "strands_tools": strands_tools,
     })
 
     agent_core_client = boto3.client('bedrock-agentcore', region_name=bedrock_region)

@@ -4484,7 +4484,7 @@ def create_alb_target_group_for_ecs(vpc_info: Dict[str, str]) -> str:
         VpcId=vpc_info["vpc_id"],
         TargetType="ip",
         HealthCheckProtocol="HTTP",
-        HealthCheckPath="/_stcore/health",
+        HealthCheckPath="/api/health",
         HealthCheckIntervalSeconds=30,
         HealthCheckTimeoutSeconds=5,
         HealthyThresholdCount=2,
@@ -4662,7 +4662,7 @@ def deploy_ecs_service(
                 "healthCheck": {
                     "command": [
                         "CMD-SHELL",
-                        "curl -f http://localhost:8501/_stcore/health || exit 1",
+                        "curl -f http://localhost:8501/api/health || exit 1",
                     ],
                     "interval": 30,
                     "timeout": 5,
@@ -4775,8 +4775,8 @@ chown -R ssm-user:ssm-user /home/ssm-user/{git_name}
 
 # Build and run docker with volume mount for config.json
 cd /home/ssm-user/{git_name}
-docker build -f Dockerfile -t streamlit-app .
-docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app streamlit-app
+docker build -f Dockerfile -t agent-ui .
+docker run -d --restart=always -p 8501:8501 -v $(pwd)/application/config.json:/app/application/config.json --name app agent-ui
 
 # Make update.sh executable for manual execution via SSM
 chmod a+rx update.sh
@@ -6130,7 +6130,7 @@ def main():
         app_environment = apply_s3_files_config(app_environment, s3_files_info)
         if write_application_config(app_environment):
             logger.info("Local testing is available while deployment continues:")
-            logger.info("  streamlit run application/app.py")
+            logger.info("  uvicorn application.server:app --host 0.0.0.0 --port 8501")
 
         # Install AgentCore runtime after CloudFront so config.json gets sharing_url
         install_agent_runtime("strands")

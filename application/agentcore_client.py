@@ -8,13 +8,12 @@ import sys
 import requests
 import uuid
 
-# Import utils from application package
 try:
     from application import utils
+    from application import chat
 except ImportError:
     import utils
-
-import chat
+    import chat
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -751,7 +750,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         logger.error(error_msg)
         return f"Error: {error_msg}", []
 
-def run_agent(prompt, user_id, history_mode, mcp_servers, model_name, notification_queue=None, skill_list=None, strands_tools=None, guardrail_enabled=None):
+def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, notification_queue=None, skill_list=None, strands_tools=None, guardrail_enabled=None):
     tool_info_list.clear()
     tool_result_list.clear()
     tool_name_list.clear()
@@ -768,7 +767,7 @@ def run_agent(prompt, user_id, history_mode, mcp_servers, model_name, notificati
         "mcp_servers": mcp_servers,
         "model_name": model_name,
         "user_id": user_id,
-        "history_mode": history_mode,
+        "runtime_session_id": runtime_session_id,
         "skill_list": skill_list or [],
         "strands_tools": strands_tools or [],
         "guardrail_enabled": bool(guardrail_enabled) if guardrail_enabled is not None else True,
@@ -798,10 +797,10 @@ def run_agent(prompt, user_id, history_mode, mcp_servers, model_name, notificati
             region_name=bedrock_region,
             config=boto_config
         )
-        session_id = runtime_session_id_for(user_id, history_mode)
+        logger.info(f"runtime_session_id: {runtime_session_id}")
         response = agent_core_client.invoke_agent_runtime(
             agentRuntimeArn=agent_runtime_arn,
-            runtimeSessionId=session_id,
+            runtimeSessionId=runtime_session_id,
             payload=payload,
             qualifier="DEFAULT" # DEFAULT or LATEST
         )

@@ -1,13 +1,13 @@
 # Strands Agent의 AgentCore 배포 및 활용
 
-여기에서는 Streamlit app은 Amazon ECS에 배포하고, Agent는 AgentCore Runtime을 활용해 배포합니다.
+여기에서는 Web UI(FastAPI + React)를 Amazon ECS에 배포하고, Agent는 AgentCore Runtime을 활용해 배포합니다.
 
 
 ## 주요 구현 
 
 ### 전체 Architecture
 
-전체적인 Architecture는 아래와 같습니다. 여기서는 MCP/SKILL를 지원하는 Strands agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)를 이용해 배포하고 streamlit 애플리케이션을 이용해 사용합니다. 개발자는 각 agent에 맞는 [Dockerfile](./runtime/strands/Dockerfile)을 이용하여, docker image를 생성하고 ECR에 업로드 합니다. 이후 [bedrock-agentcore-control](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/Welcome.html)의 [installer.py](./runtime/strands/installer.py)을 이용해서 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)의 runtime으로 배포합니다. 이 작업이 끝나면 EC2와 같은 compute에 있는 streamlit에서 Strands와 Strands agent를 활용할 수 있습니다. 애플리케이션에서 AgentCore의 runtime을 호출할 때에는 [bedrock-agentcore](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore.html)의 [invoke_agent_runtime](https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/bedrock-agentcore/client/invoke_agent_runtime.html)을 이용합니다. 이때에 각 agent를 생성할 때에 확인할 수 있는 [agentRuntimeArn](https://docs.aws.amazon.com/bedrock-agentcore-control/latest/APIReference/API_Agent.html)을 이용합니다. Agent는 [MCP](https://modelcontextprotocol.io/introduction)을 이용해 RAG, AWS Document, Tavily와 같은 검색 서비스를 활용할 수 있습니다. 여기에서는 RAG를 위하여 Lambda를 이용합니다. 데이터 저장소의 관리는 Knowledge base를 사용하고, 벡터 스토어로는 OpenSearch를 이용합니다. Agent에 필요한 S3, CloudFront, OpenSearch, Lambda등의 배포를 위해서는 AWS CDK를 이용합니다.
+전체적인 Architecture는 아래와 같습니다. MCP/SKILL를 지원하는 Strands agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)로 배포하고, Amazon ECS에 배포된 Web UI에서 활용합니다. AWS 인프라는 루트 [installer.py](./installer.py)로 배포하고, Strands agent 이미지는 [runtime_agent/strands/Dockerfile](./runtime_agent/strands/Dockerfile)로 빌드한 뒤 [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)로 AgentCore Runtime에 배포합니다. Web UI는 루트 [Dockerfile](./Dockerfile)로 ECS에 배포하며, Agent 추론은 AgentCore에서 수행합니다.
 
 <img width="1000" alt="image" src="https://github.com/user-attachments/assets/86224749-e922-4d3e-8080-1ee68048ae3c" />
 
@@ -16,13 +16,21 @@ AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.
 
 ### Operation Architecture
 
-Streamlit UI(`application/app.py`)에서 대화 모드·Skills·MCP·Strands Tools·모델을 선택하면 `application/agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 SSE 요청을 보냅니다. 로컬 개발 시에는 `run_agent_in_docker`로 `localhost:8080`의 Docker 컨테이너를 호출할 수 있습니다. Runtime은 `runtime_agent/strands/agent.py`의 `agent_strands` 엔트리포인트에서 Strands Agent, Agent Skills, 임베디드 MCP 서버를 연결한 뒤 Amazon Bedrock으로 추론합니다.
+Web UI(`application/server.py`, `application/web/`)에서 New task·Skills·MCP·Strands Tools·모델을 선택하면 `application/agentcore_client.py`가 AgentCore Runtime(`invoke_agent_runtime`)으로 SSE 요청을 보냅니다. 태스크마다 별도 `runtimeSessionId`로 Strands `FileSessionManager` 세션이 격리됩니다. Runtime은 `runtime_agent/strands/agent.py`의 `agent_strands` 엔트리포인트에서 Strands Agent, Agent Skills, MCP를 연결한 뒤 Amazon Bedrock으로 추론합니다.
+
+| 모드 | 모듈 | 설명 |
+|------|------|------|
+| **Agent (Chat)** | `application/server.py` → `agentcore_client.run_agent` | 태스크별 `runtimeSessionId`로 Strands 대화 이력 유지 |
+| Strands Runtime | `runtime_agent/strands/agent.py` | Strands SDK `Agent` + `MCPClientManager` + strands_tools |
+| Web UI | 루트 `Dockerfile` → ECS | FastAPI + React SPA |
+
+`strands-runtime`은 **ECS(Web UI)** 와 **AgentCore Runtime(Strands 서버)** 가 모두 **private subnet** 에 배포됩니다.
 
 ```mermaid
 flowchart TB
-  subgraph UI["Streamlit (application/app.py)"]
-    MODE["Agent / Agent (Chat)"]
-    SEL["Skills · MCP · Strands Tools · 모델"]
+  subgraph UI["Web UI server.py + React"]
+    TASK["New task / Task list"]
+    SEL["Skills · MCP · Strands Tools · Model"]
   end
 
   subgraph Client["application/agentcore_client.py"]
@@ -71,10 +79,8 @@ flowchart TB
     CF["sharing_url"]
   end
 
-  MODE --> RA
+  TASK --> RA
   SEL --> RA
-  MODE -.-> RD
-  SEL -.-> RD
   TEST --> AC
 
   RA --> AC
@@ -104,19 +110,11 @@ flowchart TB
   BT --> CF
 ```
 
-| 모드 | 모듈 | 설명 |
-|------|------|------|
-| **Agent** | `application/app.py` → `agentcore_client.run_agent` | 단일 턴 Agent. `history_mode=Disable`로 매 요청을 독립 처리 |
-| **Agent (Chat)** | `application/app.py` → `agentcore_client.run_agent` | 대화 이력 유지. `history_mode=Enable`로 세션 기반 interactive 대화 |
-| Strands Runtime | `runtime_agent/strands/agent.py` | Strands SDK `Agent` + `MCPClientManager` + strands_tools |
-| 임베디드 MCP | `runtime_agent/strands/mcp_server_*.py` | Tavily/Knowledge Base/AWS Docs/Trade Info/Web Fetch/Image 생성/사용자 설정 MCP 제공 |
-| Skill/MCP 선택 목록 | `application/skills.list`, `application/mcp.list` | UI에서 스킬·MCP 체크박스 옵션 제공 |
-
-플랫폼은 **AgentCore**(서버리스 Runtime)와 **Docker**(로컬 `localhost:8080`)를 지원하며, 현재 애플리케이션은 `agent_type = "strands"` 고정으로 Strands Runtime을 사용합니다. MCP는 UI에서 `tavily`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `사용자 설정`을 체크박스로 선택합니다.
+MCP는 `websearch`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `korea_weather`, `사용자 설정` 등을 선택합니다. Strands Tools는 `current_time`, `file_read`, `file_write`, `http_request`를 태스크별로 선택합니다.
 
 ### 네트워크 설정
 
-`strands-runtime`은 **ECS(Streamlit UI)** 와 **AgentCore Runtime(Strands 서버)** 가 모두 **private subnet** 에 배포됩니다. 이 환경에서는 인터넷으로 직접 나가지 않으므로, AWS API 호출은 **VPC Interface/Gateway Endpoint** 로, 외부 MCP·npm·cross-region 트래픽은 **NAT Gateway** 로 egress 를 열어야 합니다.
+`strands-runtime`은 **ECS(Web UI)** 와 **AgentCore Runtime(Strands 서버)** 가 모두 **private subnet** 에 배포됩니다. 이 환경에서는 인터넷으로 직접 나가지 않으므로, AWS API 호출은 **VPC Interface/Gateway Endpoint** 로, 외부 MCP·npm·cross-region 트래픽은 **NAT Gateway** 로 egress 를 열어야 합니다.
 
 [installer.py](./installer.py) 가 신규 VPC 생성뿐 아니라 **기존 VPC 재사용 시**에도 아래 리소스를 자동으로 맞춥니다.
 
@@ -345,34 +343,37 @@ if "text/event-stream" in response.get("contentType", ""):
 ```
 
 
-## 프로젝트 구조
+## 코드 구조
 
-프로젝트는 **Streamlit UI(`application/`)** 와 **Strands Agent Runtime(`runtime_agent/strands/`)** 으로 나뉩니다. UI는 ECS에서 사용자 입력·MCP/Skill/Strands Tools·모델 선택·스트리밍 결과 표시만 담당하고, Agent 추론·MCP·Skill 실행은 AgentCore Runtime 컨테이너에서 수행합니다.
-
-루트 [installer.py](./installer.py)는 ECS·VPC·Knowledge Base(S3 Vectors)·**S3 Files 세션 스토리지** 등 AWS 인프라를 배포하고, [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)는 AgentCore Runtime·ECR·IAM을 배포합니다.
-
-### `application/` — Streamlit UI (ECS)
-
-루트 [Dockerfile](./Dockerfile)로 빌드되어 ECS에 배포됩니다. AgentCore Runtime을 `invoke_agent_runtime`으로 호출하며, Agent 로직은 포함하지 않습니다.
+프로젝트는 **Web UI(`application/`)** 와 **Strands Agent Runtime(`runtime_agent/strands/`)** 으로 나뉩니다.
 
 ```text
-application/
-├── app.py                  # Streamlit 진입점. 모드·MCP·Skill·Strands Tools·모델 선택, 채팅 UI
-├── agentcore_client.py     # AgentCore Runtime 호출 (invoke_agent_runtime, SSE 파싱)
-├── chat.py                 # UI 세션·대화 상태 관리
-├── utils.py                # config.json 로드, 공통 유틸
-├── notification_queue.py   # 도구 호출·스트리밍 알림 큐
-├── info.py                 # 앱 메타 정보
-├── mcp.list                # UI MCP 체크박스 목록 (Runtime의 mcp.list와 대응)
-├── skills.list             # UI Skill 체크박스 목록 (Runtime의 skills.list와 대응)
-└── config.json             # region, projectName, agentRuntimeArn 등 (배포 시 생성)
+Web UI (ECS)                            AgentCore Runtime
+application/server.py                   runtime_agent/strands/agent.py
+application/web/ (React)                        │
+        ▼                                         ▼
+application/agentcore_client.py  ──SSE──▶  strands_agent.py
+  invoke_agent_runtime                      FileSessionManager (/mnt/workspace)
 ```
+
+### `application/` — Web UI (ECS)
+
+FastAPI + React SPA. `task_store.py`가 태스크별 `runtime_session_id`·`strands_tools`를 저장합니다.
 
 | 파일 | 역할 |
 |------|------|
-| `app.py` | Agent / Agent (Chat) 모드, MCP·Skill·Strands Tools·모델 선택 후 `agentcore_client.run_agent` 호출 |
-| `agentcore_client.py` | payload(prompt, mcp_servers, skill_list, strands_tools, history_mode)를 Runtime으로 전송하고 SSE 스트림 처리 |
-| `mcp.list` · `skills.list` | UI에 노출할 MCP·Skill 이름 목록. 선택값은 Runtime payload로 전달됨 |
+| `server.py` | FastAPI 앱, `/api/*` REST·SSE, React SPA 서빙 |
+| `task_store.py` | 태스크·메시지·`runtime_session_id`·`strands_tools` 영속 |
+| `agentcore_client.py` | Strands Runtime `invoke_agent_runtime` 호출 (`strands_tools` 포함) |
+| `web/` | 사이드바(New task, Skill, MCP, Strands Tools, Model) + 채팅 UI |
+
+로컬 실행:
+
+```text
+cd application/web && npm install && npm run build
+cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
+```
 
 ### `runtime_agent/strands/` — Strands Agent (AgentCore Runtime)
 
@@ -1128,10 +1129,12 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-이후 아래와 같은 명령어로 streamlit을 실행합니다. 
+이후 아래와 같이 Web UI를 빌드·실행합니다.
 
 ```text
-streamlit run application/app.py
+cd application/web && npm install && npm run build
+cd ../..
+uvicorn application.server:app --host 0.0.0.0 --port 8501
 ```
 
 
@@ -1284,7 +1287,7 @@ AgentCore Runtime 역할에 `bedrock:GetGuardrail`, `bedrock:ListGuardrails`, `b
 
 ### 추론 시 Guardrail 적용
 
-Streamlit UI(`application/app.py`)의 **Guardrail 사용** 토글로 on/off를 제어하고, `guardrail_enabled` 값이 AgentCore payload로 Runtime에 전달됩니다.
+Web UI(`application/web/`)의 **Guardrail 사용** 토글로 on/off를 제어하고, `guardrail_enabled` 값이 AgentCore payload로 Runtime에 전달됩니다.
 
 | 모델 | 적용 방식 | 설명 |
 |------|-----------|------|
@@ -1412,7 +1415,7 @@ Observability 다음 단계로 [evaluation.py](./runtime_agent/strands/evaluatio
 Online evaluation은 같은 `session.id`(대개 AgentCore `runtimeSessionId`)의 span을 모은 뒤, **마지막 활동 이후 N분 유휴**하면 세션이 끝난 것으로 보고 평가합니다.
 
 - 기본(서비스): 15분 → 이 프로젝트는 **5분**으로 설정
-- Chat 모드(`history_mode=Enable`)는 user별 `runtimeSessionId`가 고정이라 턴이 한 세션에 계속 쌓임
+- 태스크별 `runtimeSessionId`로 Strands 세션이 격리되며, 동일 태스크 내 턴이 한 세션에 쌓임
 - timeout이 길면 세션 span이 [한도](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/bedrock-agentcore-limits.html)(**1000 spans / 15 MB**)를 넘어 `ValidationException`이 납니다
 
 에이전트 대화 세션을 끊는 설정이 아니라, **평가용 세션 경계를 나누는 타이머**입니다. 값은 `evaluation.py`의 `DEFAULT_SESSION_TIMEOUT_MINUTES`에서 바꾸며, installer 재실행 시 기존 config를 `update_online_evaluation_config`로 갱신합니다.

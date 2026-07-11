@@ -110,17 +110,17 @@ claude_fable_5_models = [   # Claude Fable 5
     {
         "bedrock_region": "us-west-2", # Oregon
         "model_type": "claude",
-        "model_id": "global.anthropic.claude-fable-5"
+        "model_id": "us.anthropic.claude-fable-5"
     },
     {
         "bedrock_region": "us-east-1", # N.Virginia
         "model_type": "claude",
-        "model_id": "global.anthropic.claude-fable-5"
+        "model_id": "us.anthropic.claude-fable-5"
     },
     {
         "bedrock_region": "us-east-2", # Ohio
         "model_type": "claude",
-        "model_id": "global.anthropic.claude-fable-5"
+        "model_id": "us.anthropic.claude-fable-5"
     }
 ]
 
@@ -258,8 +258,7 @@ openai_oss_120b_models = [
     {
         "bedrock_region": "us-west-2", # Oregon
         "model_type": "openai",
-        "model_id": "openai.gpt-oss-120b-1:0",
-        "mantle_api": "chat",
+        "model_id": "openai.gpt-oss-120b-1:0"
     }
 ]
 
@@ -267,8 +266,7 @@ openai_oss_20b_models = [
     {
         "bedrock_region": "us-west-2", # Oregon
         "model_type": "openai",
-        "model_id": "openai.gpt-oss-20b-1:0",
-        "mantle_api": "chat",
+        "model_id": "openai.gpt-oss-20b-1:0"
     }
 ]
 
@@ -291,10 +289,10 @@ def get_model_info(model_name):
         models = claude_4_5_sonnet_models
     elif model_name == "Claude 4.5 Haiku":
         models = claude_4_5_haiku_models
-    elif model_name == "Claude 5.0 Sonnet":
-        models = claude_5_0_sonnet_models
     elif model_name == "Claude 4.6 Sonnet":
         models = claude_4_6_sonnet_models
+    elif model_name == "Claude 5.0 Sonnet":
+        models = claude_5_0_sonnet_models
     elif model_name == "Claude 4.6 Opus":
         models = claude_4_6_opus_models
     elif model_name == "Claude 4.7 Opus":

@@ -113,11 +113,13 @@ async def agent_strands(payload):
     strands_tools = payload.get("strands_tools", strands_agent.strands_tools or [])
     model_name = payload.get("model_name")
     user_id = payload.get("user_id")
+    runtime_session_id = payload.get("runtime_session_id")
 
     logger.info(f"query: {query}")
     logger.info(f"mcp_servers: {mcp_servers}")
     logger.info(f"skill_list: {skill_list}")
-    logger.info(f"strands_tools: {strands_tools}")
+    logger.info(f"runtime_session_id (payload): {runtime_session_id}")
+    logger.info(f"runtime_session_id (context): {strands_agent.get_runtime_session_id()}")
 
     skill_mode = payload.get("skill_mode")
     if skill_mode is None:
