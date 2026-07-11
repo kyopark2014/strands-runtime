@@ -4354,7 +4354,14 @@ def build_and_push_docker_image(
     logger.info("  Build output streams below (this may take several minutes)...")
     if _host_is_arm64():
         _run_command_streaming(
-            ["docker", "build", "--platform", CONTAINER_PLATFORM, "-t", image_uri, "."],
+            [
+                "docker", "build",
+                "--platform", CONTAINER_PLATFORM,
+                "--provenance=false",
+                "--sbom=false",
+                "-t", image_uri,
+                ".",
+            ],
             cwd=project_root,
         )
         logger.info("  ✓ Docker build completed")
@@ -4370,6 +4377,8 @@ def build_and_push_docker_image(
             [
                 "docker", "buildx", "build",
                 "--platform", CONTAINER_PLATFORM,
+                "--provenance=false",
+                "--sbom=false",
                 "-t", image_uri,
                 "-t", latest_uri,
                 "--push",

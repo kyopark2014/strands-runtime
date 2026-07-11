@@ -1219,7 +1219,14 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[st
 
     if _host_is_arm64():
         if not run_docker_command(
-            _with_build_args(["docker", "build", "--platform", CONTAINER_PLATFORM, "-t", local_tag, "."]),
+            _with_build_args([
+                "docker", "build",
+                "--platform", CONTAINER_PLATFORM,
+                "--provenance=false",
+                "--sbom=false",
+                "-t", local_tag,
+                ".",
+            ]),
             "Building Docker Image",
         ):
             return False
@@ -1240,6 +1247,8 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[st
         _with_build_args([
             "docker", "buildx", "build",
             "--platform", CONTAINER_PLATFORM,
+            "--provenance=false",
+            "--sbom=false",
             "-t", ecr_uri,
             "--push",
             ".",
