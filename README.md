@@ -36,7 +36,6 @@ flowchart TB
 
   subgraph Client["application/agentcore_client.py"]
     RA["run_agent · invoke_agent_runtime"]
-    RD["run_agent_in_docker · localhost:8080"]
     TEST["test_runtime_remote.py"]
   end
 
@@ -369,6 +368,8 @@ FastAPI + React SPA. `task_store.py`가 태스크별 `runtime_session_id`·`stra
 | `web/` | 사이드바(New task, Skill, MCP, Strands Tools, Model) + 채팅 UI |
 
 로컬 실행:
+
+로컬 개발 시 Web UI 백엔드는 **Docker 없이 uvicorn**으로 실행하고, Agent 추론은 **항상 AgentCore Runtime**(`invoke_agent_runtime`)을 사용합니다. `run_agent_in_docker` / `localhost:8080` 로컬 Docker agent 경로는 사용하지 않습니다.
 
 ```text
 cd application/web && npm install && npm run build
