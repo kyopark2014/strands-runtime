@@ -202,6 +202,8 @@ async def agent_strands(payload):
                 try:
                     import cloudwatch_metrics
 
+                    strands_agent._log_prompt_cache_usage(final)
+
                     usage = cloudwatch_metrics.extract_token_usage(final)
                     if not usage:
                         metrics = getattr(final, "metrics", None)

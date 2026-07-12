@@ -12,7 +12,7 @@ import subprocess
 
 from contextlib import contextmanager
 from typing import Dict, List, Optional
-from strands.models import BedrockModel
+from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
 from strands.models.openai import OpenAIModel
 from strands.models.openai_responses import OpenAIResponsesModel
 from strands_tools import current_time, file_read, file_write
@@ -601,6 +601,60 @@ def _build_mantle_openai_model(profile: dict, boto_session, max_output_tokens: i
     )
 
 
+# Bedrock Anthropic/Nova prompt caching (ephemeral, 5m TTL).
+PROMPT_CACHE_TTL = "5m"
+
+
+def _supports_prompt_caching(model_type: str | None) -> bool:
+    return model_type in ("claude", "nova")
+
+
+def _prompt_cache_kwargs(model_type: str) -> dict:
+    """Strands BedrockModel kwargs for prompt caching (Claude/Nova only).
+
+    - cache_prompt: system cachePoint appended at request format time, after
+      AgentSkills injects skill XML into the system prompt.
+    - cache_tools: tool schema cachePoint.
+    - cache_config: last-user-message cachePoint for tool-loop / multi-turn reuse.
+    Nova is not detected by strategy="auto", so use "anthropic" (Converse cachePoint).
+    """
+    if not _supports_prompt_caching(model_type):
+        return {}
+    strategy = "auto" if model_type == "claude" else "anthropic"
+    return {
+        "cache_prompt": "default",
+        "cache_tools": CacheToolsConfig(type="default", ttl=PROMPT_CACHE_TTL),
+        "cache_config": CacheConfig(strategy=strategy, ttl=PROMPT_CACHE_TTL),
+    }
+
+
+def _log_prompt_cache_usage(result) -> None:
+    """Log cacheRead / cacheWrite from AgentResult metrics when present."""
+    metrics = getattr(result, "metrics", None)
+    if metrics is None:
+        return
+    usage = None
+    latest = getattr(metrics, "latest_agent_invocation", None)
+    if latest is not None:
+        latest_usage = getattr(latest, "usage", None)
+        if isinstance(latest_usage, dict) and latest_usage:
+            usage = latest_usage
+    if usage is None:
+        accumulated = getattr(metrics, "accumulated_usage", None)
+        if isinstance(accumulated, dict):
+            usage = accumulated
+    if not isinstance(usage, dict):
+        return
+    cache_read = usage.get("cacheReadInputTokens") or 0
+    cache_creation = usage.get("cacheWriteInputTokens") or 0
+    if cache_read or cache_creation:
+        logger.info(
+            "prompt cache usage: cache_read=%s cache_creation=%s",
+            cache_read,
+            cache_creation,
+        )
+
+
 def get_model():
     model_profiles = info.get_model_info(chat.model_name)
     if not model_profiles:
@@ -652,6 +706,7 @@ def get_model():
 
     adaptive_thinking = chat.uses_adaptive_thinking(model_id)
     guardrail_kwargs = chat.get_bedrock_model_guardrail_kwargs(model_type)
+    prompt_cache_kwargs = _prompt_cache_kwargs(model_type)
 
     if chat.reasoning_mode == "Enable" and model_type != "openai" and not adaptive_thinking:
         model = BedrockModel(
@@ -667,6 +722,7 @@ def get_model():
                     "budget_tokens": thinking_budget,
                 }
             },
+            **prompt_cache_kwargs,
             **guardrail_kwargs,
         )
     elif chat.reasoning_mode == "Disable" and model_type != "openai" and not adaptive_thinking:
@@ -682,6 +738,7 @@ def get_model():
                     "type": "disabled"
                 }
             },
+            **prompt_cache_kwargs,
             **guardrail_kwargs,
         )
     elif model_type != "openai" and adaptive_thinking:
@@ -691,6 +748,7 @@ def get_model():
             model_id=model_id,
             max_tokens=maxOutputTokens,
             stop_sequences=[STOP_SEQUENCE],
+            **prompt_cache_kwargs,
             **guardrail_kwargs,
         )
     elif model_type == "openai":
