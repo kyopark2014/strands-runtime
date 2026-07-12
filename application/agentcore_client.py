@@ -174,6 +174,31 @@ def _result_has_reference_section(text: str) -> bool:
     return isinstance(text, str) and "### Reference" in text
 
 
+def _sanitize_reference_text(text: str, max_len: int) -> str:
+    """Collapse whitespace/newlines and strip markdown that breaks list links."""
+    if not text:
+        return ""
+    cleaned = " ".join(str(text).replace("\r", "\n").split())
+    cleaned = cleaned.replace("```", "`").replace("[", "\\[").replace("]", "\\]")
+    if len(cleaned) > max_len:
+        cleaned = cleaned[: max_len - 3].rstrip(" .") + "..."
+    return cleaned
+
+
+def _format_references_markdown(references: list) -> str:
+    """Build a Reference section safe for markdown list rendering."""
+    lines = ["\n\n### Reference"]
+    for i, reference in enumerate(references, start=1):
+        title = _sanitize_reference_text(reference.get("title") or "Untitled", 120)
+        content = _sanitize_reference_text(reference.get("content") or "", 100)
+        url = (reference.get("url") or "").strip()
+        if url:
+            lines.append(f"{i}. [{title}]({url}) — {content}" if content else f"{i}. [{title}]({url})")
+        else:
+            lines.append(f"{i}. {title} — {content}" if content else f"{i}. {title}")
+    return "\n".join(lines) + "\n"
+
+
 def _append_references_to_result(result, references: list):
     """Append a Reference block once; skip if the result already includes one."""
     if not references:
@@ -181,10 +206,7 @@ def _append_references_to_result(result, references: list):
     text = result if isinstance(result, str) else (str(result) if result is not None else "")
     if _result_has_reference_section(text):
         return result
-    ref = "\n\n### Reference\n"
-    for i, reference in enumerate(references):
-        ref += f"{i+1}. [{reference['title']}]({reference['url']}), {reference['content']}...\n"
-    return text + ref
+    return text + _format_references_markdown(references)
 
 
 def get_tool_info(tool_name, tool_content):
