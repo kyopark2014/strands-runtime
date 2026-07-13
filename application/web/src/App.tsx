@@ -9,7 +9,7 @@ import { ChatThread } from "./components/ChatThread";
 import { ChatInput } from "./components/ChatInput";
 import { UserIdModal } from "./components/UserIdModal";
 
-type DrawerKind = "skill" | "mcp" | "strands" | null;
+type DrawerKind = "skill" | "mcp" | "strands" | "model" | null;
 
 function sortTasks(tasks: Task[]): Task[] {
   return [...tasks].sort((a, b) => {
