@@ -66,7 +66,7 @@ flowchart TB
   end
 
   subgraph MCPServers["Embedded MCP (mcp_server_*.py)"]
-    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · 사용자 설정"]
+    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · korea_weather"]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -110,7 +110,7 @@ flowchart TB
   BT --> CF
 ```
 
-MCP는 `websearch`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `korea_weather`, `사용자 설정` 등을 선택합니다. Strands Tools는 `current_time`, `file_read`, `file_write`, `http_request`를 태스크별로 선택합니다.
+MCP는 `websearch`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `korea_weather` 등을 선택합니다. Strands Tools는 `current_time`, `file_read`, `file_write`, `http_request`를 태스크별로 선택합니다.
 
 ### 네트워크 설정
 

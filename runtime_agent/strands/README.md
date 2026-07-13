@@ -51,7 +51,7 @@ flowchart TB
   end
 
   subgraph MCPServers["Embedded MCP (mcp_server_*.py)"]
-    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · 사용자 설정"]
+    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · korea_weather"]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -322,7 +322,7 @@ MCP 서버는 [`mcp_config.py`](./mcp_config.py)와 [`mcp.list`](./mcp.list)로 
 | trade info | 무역 정보 조회 |
 | web_fetch | Playwright 기반 URL 문서 fetch |
 | image generation | 이미지 생성 |
-| 사용자 설정 | 사용자 정의 MCP 서버 |
+| korea_weather | 한국 날씨 정보 |
 
 MCP 클라이언트는 `MCPClientManager`가 stdio·streamable HTTP 전송을 지원하며, AgentCore Runtime MCP에는 SigV4 인증이 적용됩니다.
 
