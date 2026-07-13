@@ -12,6 +12,7 @@ import os
 import json
 import shutil
 import argparse
+import time
 from datetime import datetime
 from typing import Optional
 import boto3
@@ -1052,30 +1053,67 @@ def remove_local_docker_images(image_refs: list[str]) -> None:
 def check_docker_daemon(timeout: int = 30) -> bool:
     """Verify Docker daemon is reachable before build/push."""
     print("===== Checking Docker Daemon =====", flush=True)
-    try:
-        result = subprocess.run(
-            ["docker", "info"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        if result.returncode != 0:
-            print(f"Error: Docker daemon is not available: {result.stderr.strip()}")
-            print(
-                "  Build on a machine with Docker, push to ECR, then rerun with "
-                "--skip-docker-build on this host."
+
+    def _reachable() -> tuple[bool, str]:
+        try:
+            result = subprocess.run(
+                ["docker", "info"],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
             )
-            return False
+            if result.returncode == 0:
+                return True, ""
+            return False, (result.stderr or result.stdout).strip()
+        except subprocess.TimeoutExpired:
+            return False, f"docker info timed out after {timeout}s"
+        except Exception as e:
+            return False, str(e)
+
+    ok, detail = _reachable()
+    if ok:
         print("  ✓ Docker daemon is running", flush=True)
         return True
-    except subprocess.TimeoutExpired:
-        print(f"Error: Docker daemon did not respond within {timeout}s.")
-        print("  Start Docker Desktop and retry.")
-        return False
-    except Exception as e:
-        print(f"Error: Failed to check Docker daemon: {e}")
-        return False
+
+    print(f"  Docker daemon not reachable: {detail}", flush=True)
+    print("  Attempting to start Docker service...", flush=True)
+    for cmd in (
+        ["systemctl", "start", "docker"],
+        ["sudo", "systemctl", "start", "docker"],
+        ["service", "docker", "start"],
+        ["sudo", "service", "docker", "start"],
+    ):
+        try:
+            started = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if started.returncode == 0:
+                print(f"  Started Docker via: {' '.join(cmd)}", flush=True)
+                break
+        except Exception:
+            continue
+
+    time.sleep(2)
+    ok, detail = _reachable()
+    if ok:
+        print("  ✓ Docker daemon is running", flush=True)
+        return True
+
+    print(f"Error: Docker daemon is not available: {detail}")
+    print(
+        "  On Amazon Linux / EC2, run:\n"
+        "    sudo dnf install -y docker   # or: sudo yum install -y docker\n"
+        "    sudo systemctl start docker && sudo systemctl enable docker\n"
+        "    sudo usermod -aG docker $USER && newgrp docker\n"
+        "    docker info\n"
+        "  Or build elsewhere, push to ECR, then rerun with --skip-docker-build."
+    )
+    return False
 
 def docker_login(account_id, region):
     """Login to AWS ECR using Docker."""

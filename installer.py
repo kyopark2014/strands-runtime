@@ -4301,6 +4301,80 @@ DOCKER_MIN_FREE_MB = 2048
 DOCKER_REQUIRED_FREE_MB = 1024
 
 
+def _docker_daemon_reachable(timeout: int = 20) -> Tuple[bool, str]:
+    """Return (ok, detail) for whether the local Docker daemon accepts commands."""
+    try:
+        result = subprocess.run(
+            ["docker", "info"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, (result.stderr or result.stdout).strip()
+    except subprocess.TimeoutExpired:
+        return False, f"docker info timed out after {timeout}s"
+    except Exception as e:
+        return False, str(e)
+
+
+def _try_start_docker_daemon() -> bool:
+    """Best-effort start of the Docker service on Linux hosts."""
+    commands = [
+        ["systemctl", "start", "docker"],
+        ["sudo", "systemctl", "start", "docker"],
+        ["service", "docker", "start"],
+        ["sudo", "service", "docker", "start"],
+    ]
+    for cmd in commands:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode == 0:
+                logger.info(f"  Started Docker via: {' '.join(cmd)}")
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def ensure_docker_daemon_running() -> None:
+    """Require a reachable Docker daemon before image build/push."""
+    ok, detail = _docker_daemon_reachable()
+    if ok:
+        logger.info("  ✓ Docker daemon is running")
+        return
+
+    logger.warning(f"  Docker daemon not reachable: {detail}")
+    logger.info("  Attempting to start Docker service...")
+    if _try_start_docker_daemon():
+        time.sleep(2)
+        ok, detail = _docker_daemon_reachable()
+        if ok:
+            logger.info("  ✓ Docker daemon is running")
+            return
+
+    raise RuntimeError(
+        "Docker daemon is not available.\n"
+        f"  Detail: {detail or 'unknown'}\n"
+        "  On Amazon Linux / EC2, run:\n"
+        "    sudo dnf install -y docker   # or: sudo yum install -y docker\n"
+        "    sudo systemctl start docker\n"
+        "    sudo systemctl enable docker\n"
+        "    sudo usermod -aG docker $USER\n"
+        "    newgrp docker\n"
+        "    docker info\n"
+        "  Then rerun installer.py (or use --skip-docker-build if the image is already in ECR)."
+    )
+
+
 def _host_is_arm64() -> bool:
     return os.uname().machine.lower() in ("aarch64", "arm64")
 
@@ -4676,6 +4750,7 @@ def build_and_push_docker_image(
     if shutil.which("docker") is None:
         raise RuntimeError("Docker CLI is required to build and push the container image")
 
+    ensure_docker_daemon_running()
     _require_arm64_build_host("ECS container image build")
 
     if not image_tag:
