@@ -587,7 +587,6 @@ def _build_mantle_openai_model(profile: dict, boto_session, max_output_tokens: i
             bedrock_mantle_config=mantle_config,
             params={
                 "max_output_tokens": max_output_tokens,
-                "temperature": 0.1,
             },
         )
 
@@ -596,7 +595,6 @@ def _build_mantle_openai_model(profile: dict, boto_session, max_output_tokens: i
         bedrock_mantle_config=mantle_config,
         params={
             "max_tokens": max_output_tokens,
-            "temperature": 0.1,
         },
     )
 
