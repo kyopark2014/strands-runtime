@@ -66,7 +66,12 @@ def get_config():
     skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
     default_skills = config.get("default_skills") or []
-    default_mcp = config.get("default_mcp_servers") or ["web_fetch", "websearch"]
+    default_mcp = config.get("default_mcp_servers") or [
+        "web_fetch",
+        "websearch",
+        "aws documentation",
+        "korea_weather",
+    ]
     default_strands_tools = config.get("default_strands_tool_selections") or DEFAULT_STRANDS_TOOLS
     default_skills = [s for s in default_skills if s in skill_options]
     default_mcp = [m for m in default_mcp if m in mcp_options]
