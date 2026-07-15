@@ -1225,7 +1225,58 @@ selected_skill_list = []
 selected_skill_mode = None
 selected_session_id = None
 selected_guardrail_enabled = None
+selected_model_name = None
 agent = None
+
+# OpenAI/Mantle reasoning and unsigned thinking cannot be replayed to Claude/Nova.
+_BEDROCK_NON_REPLAYABLE_BLOCK_KEYS = frozenset({"reasoningContent", "reasoning", "thinking"})
+
+
+def _is_non_replayable_content_block(block) -> bool:
+    if not isinstance(block, dict):
+        return False
+    if any(key in block for key in _BEDROCK_NON_REPLAYABLE_BLOCK_KEYS):
+        return True
+    block_type = block.get("type")
+    return block_type in ("reasoning", "thinking")
+
+
+def sanitize_messages_for_bedrock_target(messages: list) -> list:
+    """Strip reasoning/thinking blocks so GPT history can be replayed on Claude/Nova."""
+    sanitized = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            sanitized.append(msg)
+            continue
+        cleaned = [block for block in content if not _is_non_replayable_content_block(block)]
+        if not cleaned:
+            # Keep a minimal text block so roles/tool pairs stay valid when possible.
+            cleaned = [{"text": ""}]
+        new_msg = dict(msg)
+        new_msg["content"] = cleaned
+        sanitized.append(new_msg)
+    return sanitized
+
+
+def maybe_sanitize_agent_history_for_model() -> None:
+    """When targeting Bedrock Claude/Nova, drop non-replayable history blocks in-place."""
+    if agent is None or chat.model_type not in ("claude", "nova"):
+        return
+    messages = getattr(agent, "messages", None)
+    if not messages:
+        return
+    cleaned = sanitize_messages_for_bedrock_target(list(messages))
+    if cleaned != list(messages):
+        logger.info(
+            "Sanitized %s history message(s) for Bedrock model_type=%s",
+            len(messages),
+            chat.model_type,
+        )
+        agent.messages = cleaned
 
 def _sanitize_reference_text(text: str, max_len: int) -> str:
     """Collapse whitespace/newlines and strip markdown that breaks list links."""
@@ -1268,7 +1319,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id, selected_guardrail_enabled
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id, selected_guardrail_enabled, selected_model_name
 
     current_skill_mode = chat.skill_mode
     current_session_id = get_runtime_session_id()
@@ -1279,6 +1330,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         or selected_skill_mode != current_skill_mode
         or selected_session_id != current_session_id
         or selected_guardrail_enabled != chat.guardrail_enabled
+        or selected_model_name != chat.model_name
         or agent is None
     ):
         selected_strands_tools = list(strands_tools)
@@ -1287,6 +1339,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         selected_skill_mode = current_skill_mode
         selected_session_id = current_session_id
         selected_guardrail_enabled = chat.guardrail_enabled
+        selected_model_name = chat.model_name
         
         mcp_manager.stop_agent_clients()
         
@@ -1296,6 +1349,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         mcp_manager.start_agent_clients(mcp_servers)
 
     mcp_manager.start_agent_clients(mcp_servers)
+    maybe_sanitize_agent_history_for_model()
 
     # run agent
     final_result = current = ""

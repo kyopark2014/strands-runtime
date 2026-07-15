@@ -157,6 +157,7 @@ async def agent_strands(payload):
         or strands_agent.selected_skill_mode != skill_mode
         or strands_agent.selected_session_id != strands_agent.get_runtime_session_id()
         or strands_agent.selected_guardrail_enabled != chat.guardrail_enabled
+        or strands_agent.selected_model_name != chat.model_name
         or strands_agent.agent is None
     )
     if needs_agent:
@@ -166,6 +167,7 @@ async def agent_strands(payload):
         strands_agent.selected_skill_mode = skill_mode
         strands_agent.selected_session_id = strands_agent.get_runtime_session_id()
         strands_agent.selected_guardrail_enabled = chat.guardrail_enabled
+        strands_agent.selected_model_name = chat.model_name
 
         strands_agent.mcp_manager.stop_agent_clients()
         strands_agent.agent = strands_agent.create_agent(
@@ -174,6 +176,7 @@ async def agent_strands(payload):
         strands_agent.mcp_manager.start_agent_clients(mcp_servers)
 
     strands_agent.mcp_manager.start_agent_clients(mcp_servers)
+    strands_agent.maybe_sanitize_agent_history_for_model()
 
     final_output: dict = {"messages": "", "image_url": []}
     streamed_text = ""
