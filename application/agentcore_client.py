@@ -1,6 +1,7 @@
 import boto3
 from botocore.config import Config
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectionError as BotocoreConnectionError
+from botocore.exceptions import EndpointConnectionError, ProxyConnectionError
 import json
 import os
 import logging
@@ -48,13 +49,17 @@ def _runtime_id_from_arn(arn: str) -> str:
 
 
 def _candidate_runtime_names(agent_name: str, agent_type: str | None) -> list:
-    """Candidate AgentCore runtime names, including installer naming (runtime_<type>)."""
+    """Candidate AgentCore runtime names, including installer naming (e.g. strands_runtime)."""
     names = [agent_name]
+    project_slug = projectName.replace("-", "_")
+    names.append(project_slug)
+    names.append(f"runtime_{project_slug}")
     if agent_type:
         normalized = agent_type.replace("-", "_")
-        names.append(f"runtime_{normalized}")
         names.append(f"agent_runtime_{normalized}")
-        names.append(f"{projectName.replace('-', '_')}_{normalized}")
+        names.append(normalized)
+        names.append(f"runtime_{normalized}")
+        names.append(f"{project_slug}_{normalized}")
     seen = set()
     return [name for name in names if not (name in seen or seen.add(name))]
 
@@ -76,6 +81,13 @@ def _lookup_runtime_by_name(agent_name: str, agent_type: str | None) -> str | No
 
     logger.error(f"No agent runtime matched candidates: {candidate_names}")
     return None
+
+
+def _validation_unavailable(exc: Exception) -> bool:
+    if isinstance(exc, (ProxyConnectionError, EndpointConnectionError, BotocoreConnectionError)):
+        return True
+    message = str(exc).lower()
+    return "proxy" in message or "could not connect" in message or "connection" in message
 
 
 def _is_runtime_arn_valid(arn: str) -> bool:
@@ -107,14 +119,37 @@ def load_agentcore_config(agent_name, agent_type=None):
             configured_arns.append((f"agent_runtime_arn_{agent_type}", typed_arn))
 
     for key, arn in configured_arns:
-        if _is_runtime_arn_valid(arn):
-            logger.info(f"Using {key} from config: {arn}")
-            return arn
+        try:
+            if _is_runtime_arn_valid(arn):
+                logger.info(f"Using {key} from config: {arn}")
+                return arn
+        except Exception as exc:
+            if _validation_unavailable(exc):
+                logger.warning(
+                    "Runtime ARN validation unavailable (%s); using %s from config: %s",
+                    exc,
+                    key,
+                    arn,
+                )
+                return arn
+            raise
         logger.warning(
             f"Configured {key} is missing or deleted; falling back to runtime name lookup: {arn}"
         )
 
-    return _lookup_runtime_by_name(agent_name, agent_type)
+    try:
+        return _lookup_runtime_by_name(agent_name, agent_type)
+    except Exception as exc:
+        if configured_arns and _validation_unavailable(exc):
+            key, arn = configured_arns[0]
+            logger.warning(
+                "Runtime lookup unavailable (%s); using %s from config: %s",
+                exc,
+                key,
+                arn,
+            )
+            return arn
+        raise
 
 def runtime_session_id_for(user_id: str, history_mode: str) -> str:
     """AgentCore runtimeSessionId (min length 33).
