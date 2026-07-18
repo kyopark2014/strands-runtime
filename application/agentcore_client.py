@@ -817,7 +817,7 @@ def run_agent_in_docker(prompt, agent_type, history_mode, mcp_servers, model_nam
         logger.error(error_msg)
         return f"Error: {error_msg}", []
 
-def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, notification_queue=None, skill_list=None, strands_tools=None, guardrail_enabled=None):
+def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, notification_queue=None, skill_list=None, strands_tools=None, guardrail_enabled=None, files=None):
     tool_info_list.clear()
     tool_result_list.clear()
     tool_name_list.clear()
@@ -838,6 +838,7 @@ def run_agent(prompt, user_id, mcp_servers, model_name, runtime_session_id, noti
         "skill_list": skill_list or [],
         "strands_tools": strands_tools or [],
         "guardrail_enabled": bool(guardrail_enabled) if guardrail_enabled is not None else True,
+        "files": files or [],
     })
 
     agent_type = "strands"

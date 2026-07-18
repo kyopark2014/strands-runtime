@@ -608,9 +608,40 @@ def load_document(file_type, s3_file_name):
 
 fileId = uuid.uuid4().hex
 
-def get_summary_of_uploaded_file(file_name, st):
-    file_type = file_name[file_name.rfind('.')+1:len(file_name)]            
-    logger.info(f"file_type: {file_type}")
+def _file_name_from_ref(file_ref: str) -> str:
+    """Extract a basename from a sharing URL or plain file name."""
+    raw = (file_ref or "").strip()
+    if not raw:
+        return ""
+    name = raw.rsplit("/", 1)[-1]
+    return parse.unquote(name)
+
+
+def get_summary_of_uploaded_file(file_ref, st=None, prompt=""):
+    """Analyze an uploaded file (by URL or name) and return a text summary.
+
+    Images are loaded from S3 under images/ and summarized with vision.
+    Documents keep the existing docs/ load path.
+    """
+    file_name = _file_name_from_ref(file_ref)
+    if not file_name:
+        return "파일 이름을 확인할 수 없습니다."
+
+    file_type = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+    logger.info(f"get_summary_of_uploaded_file: file_name={file_name}, file_type={file_type}")
+
+    if file_type in ("png", "jpeg", "jpg", "webp", "gif"):
+        s3_client = boto3.client(
+            service_name="s3",
+            region_name=bedrock_region,
+        )
+        s3_key = f"{s3_image_prefix}/{file_name}"
+        logger.info(f"loading image from s3://{s3_bucket}/{s3_key}")
+        image_obj = s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
+        image_content = image_obj["Body"].read()
+        return summarize_image(image_content, prompt or "", st=None)
+
+    msg = "지원하지 않는 파일 형식입니다."
 
     if file_type == 'csv':
         docs = load_csv_document(file_name)
@@ -621,7 +652,7 @@ def get_summary_of_uploaded_file(file_name, st):
     
         msg = get_summary(contexts)
     
-    if file_type == 'pdf' or file_type == 'txt' or file_type == 'md' or file_type == 'pptx' or file_type == 'docx':
+    elif file_type == 'pdf' or file_type == 'txt' or file_type == 'md' or file_type == 'pptx' or file_type == 'docx':
         texts = load_document(file_type, file_name)
 
         if len(texts):
@@ -1895,14 +1926,16 @@ def summary_image(img_base64, instruction):
     return extracted_text
 
 
-def summarize_image(image_content, prompt, st):
+def summarize_image(image_content, prompt, st=None):
     """Full image analysis: resize, extract text, summarize."""
     img_base64 = _resize_and_encode(image_content)
 
-    if debug_mode == "Enable":
-        status = "이미지에서 텍스트를 추출합니다."
-        logger.info(f"status: {status}")
-        st.info(status)
+    def _status(message: str) -> None:
+        logger.info(f"status: {message}")
+        if st is not None and debug_mode == "Enable" and hasattr(st, "info"):
+            st.info(message)
+
+    _status("이미지에서 텍스트를 추출합니다.")
 
     text = extract_text(img_base64)
 
@@ -1911,15 +1944,8 @@ def summarize_image(image_content, prompt, st):
     else:
         extracted_text = text
 
-    if debug_mode == "Enable":
-        status = f"### 추출된 텍스트\n\n{extracted_text}"
-        logger.info(f"status: {status}")
-        st.info(status)
-
-    if debug_mode == "Enable":
-        status = "이미지의 내용을 분석합니다."
-        logger.info(f"status: {status}")
-        st.info(status)
+    _status(f"### 추출된 텍스트\n\n{extracted_text}")
+    _status("이미지의 내용을 분석합니다.")
 
     image_summary = summary_image(img_base64, prompt)
 

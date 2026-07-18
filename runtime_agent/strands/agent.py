@@ -1,5 +1,6 @@
 import logging
 import sys
+import traceback
 
 import chat
 import httpx
@@ -115,7 +116,13 @@ async def agent_strands(payload):
     user_id = payload.get("user_id")
     runtime_session_id = payload.get("runtime_session_id")
 
+    files = payload.get("files") or []
+    if not isinstance(files, list):
+        files = [files] if files else []
+    files = [str(f).strip() for f in files if str(f).strip()]
+
     logger.info(f"query: {query}")
+    logger.info(f"files: {files}")
     logger.info(f"mcp_servers: {mcp_servers}")
     logger.info(f"skill_list: {skill_list}")
     logger.info(f"runtime_session_id (payload): {runtime_session_id}")
@@ -177,6 +184,26 @@ async def agent_strands(payload):
 
     strands_agent.mcp_manager.start_agent_clients(mcp_servers)
     strands_agent.maybe_sanitize_agent_history_for_model()
+
+    message_content = query or ""
+    if files:
+        file_summaries = []
+        for file_ref in files:
+            file_name = chat._file_name_from_ref(file_ref)
+            logger.info(f"analyzing uploaded file: {file_ref}")
+            try:
+                summary = chat.get_summary_of_uploaded_file(file_ref, prompt=query or "")
+            except Exception as e:
+                logger.error(f"Failed to summarize file {file_ref}: {traceback.format_exc()}")
+                summary = f"파일 분석 중 오류가 발생했습니다: {e}"
+            file_summaries.append(
+                f"선택한 파일({file_name})의 내용을 요약하면 아래와 같습니다.\n\n{summary}"
+            )
+        message_content = (message_content + "\n\n" if message_content else "") + "\n\n".join(
+            file_summaries
+        )
+        query = message_content
+        logger.info(f"query with file summaries length: {len(query)}")
 
     final_output: dict = {"messages": "", "image_url": []}
     streamed_text = ""
