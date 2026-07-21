@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 
@@ -62,22 +61,18 @@ class DefaultsPatch(BaseModel):
 
 @router.get("")
 def get_config():
-    config = utils.load_config()
     skill_options = load_capability_list("skills.list")
     mcp_options = load_capability_list("mcp.list")
-    default_skills = config.get("default_skills") or []
-    default_mcp = config.get("default_mcp_servers") or [
-        "web_fetch",
-        "websearch",
-        "aws documentation",
-        "korea_weather",
-    ]
+    default_skills, default_mcp = utils.get_initial_tool_defaults()
+    config = utils.load_config()
     default_strands_tools = config.get("default_strands_tool_selections") or DEFAULT_STRANDS_TOOLS
     default_skills = [s for s in default_skills if s in skill_options]
     default_mcp = [m for m in default_mcp if m in mcp_options]
     default_strands_tools = [t for t in default_strands_tools if t in STRANDS_TOOLS]
     if not default_skills and "skill-creator" in skill_options:
         default_skills = ["skill-creator"]
+    if not default_mcp:
+        logger.info("No initial MCP defaults matched current capability list")
     if not default_strands_tools:
         default_strands_tools = DEFAULT_STRANDS_TOOLS
     return {
@@ -96,10 +91,10 @@ def get_config():
 @router.patch("/defaults")
 def patch_defaults(body: DefaultsPatch):
     config = utils.load_config()
-    if body.default_skills is not None:
-        config["default_skills"] = body.default_skills
-    if body.default_mcp_servers is not None:
-        config["default_mcp_servers"] = body.default_mcp_servers
+    utils.save_favorite_tools(
+        skills=body.default_skills,
+        mcp_servers=body.default_mcp_servers,
+    )
     if body.default_strands_tools is not None:
         config["default_strands_tool_selections"] = body.default_strands_tools
     with open(utils.config_path, "w", encoding="utf-8") as f:
