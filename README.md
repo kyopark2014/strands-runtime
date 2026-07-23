@@ -65,7 +65,7 @@ flowchart TB
   end
 
   subgraph MCPServers["Embedded MCP (mcp_server_*.py)"]
-    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation · korea_weather"]
+    MCPsrv["tavily · knowledge base · aws documentation · trade info · web_fetch · image generation"]
   end
 
   subgraph LLM["Amazon Bedrock"]
@@ -109,7 +109,7 @@ flowchart TB
   BT --> CF
 ```
 
-MCP는 `websearch`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation`, `korea_weather` 등을 선택합니다. Strands Tools는 `current_time`, `file_read`, `file_write`, `http_request`를 태스크별로 선택합니다.
+MCP는 `websearch`, `knowledge base`, `aws documentation`, `trade info`, `web_fetch`, `image generation` 등을 선택합니다. Strands Tools는 `current_time`, `file_read`, `file_write`, `http_request`를 태스크별로 선택합니다.
 
 ### 네트워크 설정
 
@@ -492,7 +492,7 @@ runtime_agent/strands/
 ├── chat.py                 # FileSessionManager 기반 대화 메모리
 ├── skill.py                # SkillManager, get_skill_instructions 도구
 ├── mcp_config.py           # 선택된 MCP → stdio subprocess command/args 매핑
-├── mcp_server_*.py         # MCP 서버 (retrieve, trade_info, image_generation, korea_weather 등)
+├── mcp_server_*.py         # MCP 서버 (retrieve, trade_info, image_generation 등)
 ├── mcp_retrieve.py         # Knowledge Base RAG MCP
 ├── agentcore_sigv4_auth.py # AgentCore MCP 호출용 SigV4 인증
 ├── mcp.list                # 지원 MCP 목록

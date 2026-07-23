@@ -51,8 +51,6 @@ def load_config(mcp_type):
         mcp_type = "aws_documentation"    
     elif mcp_type == "trade info":
         mcp_type = "trade_info"
-    elif mcp_type == "weather":
-        mcp_type = "korea_weather"
     elif mcp_type == "image generation":
         mcp_type = "image_generation"
     
@@ -75,16 +73,6 @@ def load_config(mcp_type):
                     "env": {
                         "FASTMCP_LOG_LEVEL": "ERROR"
                     }
-                }
-            }
-        }
-    
-    elif mcp_type == "korea_weather":
-        return {
-            "mcpServers": {
-                "korea-weather": {
-                    "command": "python",
-                    "args": [f"{workingDir}/mcp_server_korea_weather.py"]
                 }
             }
         }
