@@ -1509,7 +1509,7 @@ https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}#dashboar
 
 ## Security
 
-공개 진입점은 **CloudFront → ALB → ECS** 입니다. ALB는 public subnet의 `internet-facing` Load Balancer이지만, ALB Security Group ingress는 인터넷 전체(`0.0.0.0/0`)가 아니라 **CloudFront origin IP만** 허용합니다.
+공개 진입점은 **CloudFront → ALB → ECS** 입니다. ALB는 public subnet의 `internet-facing` Load Balancer이지만, (1) Security Group에서 CloudFront IP만 허용하고, (2) 공유 비밀 헤더가 없으면 ALB가 요청을 거부합니다.
 
 ### ALB Security Group (CloudFront only)
 
@@ -1528,6 +1528,19 @@ https://{region}.console.aws.amazon.com/cloudwatch/home?region={region}#dashboar
 3. `create_alb_security_group()` — 신규 생성과 기존 SG 재사용 시 위 규칙을 항상 맞춤  
 
 이로써 ALB DNS로 CloudFront를 우회해 직접 접근하는 경로를 차단합니다. ECS Security Group(`ecs-sg-for-{project_name}`)은 계속 ALB SG에서만 8501을 허용합니다.
+
+### CloudFront → ALB origin header
+
+SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회할 수 있으므로, 오리진 공유 비밀 헤더로 한 겹 더 막습니다.
+
+| 항목 | 내용 |
+|------|------|
+| 헤더 이름 | `X-Custom-Header` |
+| 헤더 값 | Secrets Manager `{project_name}/cloudfront-alb-origin-header` (최초 배포 시 랜덤 생성, 소스 하드코딩 없음) |
+| CloudFront | ALB 오리진에 해당 헤더를 주입 (`create_cloudfront_distribution` / `_ensure_cloudfront_alb_origin_config`) |
+| ALB listener | default action = **403 fixed-response**, 헤더 일치 시에만 target group으로 forward (`ensure_alb_listener_origin_protection`) |
+
+삭제 시 `uninstaller.py`의 `delete_alb_origin_header_secret()`이 해당 시크릿을 제거합니다.
 
 ### IAM least privilege
 
