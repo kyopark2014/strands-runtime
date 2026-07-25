@@ -946,17 +946,24 @@ class MCPClientManager:
             for name in client_names:
                 client = self.get_client(name)
                 if not client:
-                    raise RuntimeError(
-                        f"MCP client not configured for {name!r}. Check init_mcp_clients and mcp_config."
+                    logger.warning(
+                        f"MCP client not configured for {name!r}; skipping. "
+                        "Check init_mcp_clients and mcp_config."
                     )
+                    continue
                 self._persistent_stack.enter_context(client)
                 logger.info(f"client started: {name}")
+            started = [
+                name for name in client_names if self.get_client(name) is not None
+            ]
+            if not started:
+                self.stop_agent_clients()
+                return False
+            self._persistent_client_names = started
+            return True
         except Exception:
             self.stop_agent_clients()
             raise
-
-        self._persistent_client_names = list(client_names)
-        return True
     
     def stop_agent_clients(self):
         """Stop all persistent MCP clients."""

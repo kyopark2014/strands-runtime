@@ -110,16 +110,15 @@ custom_header_value = f"{project_name}_12dab15e4s31"
 
 | 역할 | 설명 |
 |------|------|
-| `role-knowledge-base-for-{project_name}-{region}` | Bedrock Knowledge Base용 역할 (S3, S3 Vectors, Bedrock 모델 접근) |
-| `role-agent-for-{project_name}-{region}` | Bedrock Agent용 역할 |
-| `role-ecs-task-for-{project_name}-{region}` | ECS 태스크용 역할 (Bedrock, S3, AgentCore invoke, Secrets Manager, S3 Files mount 등) |
+| `role-knowledge-base-for-{project_name}-{region}` | Bedrock Knowledge Base용 역할 (프로젝트 S3 Get/List, AOSS collection, Bedrock Invoke) |
+| `role-ecs-task-for-{project_name}-{region}` | ECS 태스크용 역할 (Bedrock Invoke/Mantle/KB ingest, AgentCore invoke, 프로젝트 S3, S3 Files mount) |
 | `role-ecs-execution-for-{project_name}-{region}` | ECS 태스크 실행 역할 (ECR pull, CloudWatch Logs) |
 | `role-agentcore-gateway-websearch-for-{project_name}` | AgentCore Web Search Gateway 서비스 역할 |
 | `role-s3files-sync-for-{project_name}` | S3 Files ↔ S3 bucket 동기화 역할 (`elasticfilesystem.amazonaws.com` trust) |
 
 > AgentCore Runtime 실행 역할(`AmazonBedrockAgentCoreRuntimeRoleFor{project_name}`)은 `runtime_agent/strands/installer.py`에서 생성하며, S3 Files 사용 시 `s3files:ClientMount` 등 권한이 조건부로 추가됩니다. ECS Task Role에는 `ensure_ecs_task_s3files_policy()`로 mount 권한이 추가됩니다.
 
-> `create_lambda_role()`, `create_agentcore_memory_role()` 함수는 코드에 남아 있으나, 현재 `main()` 배포 흐름에서는 호출되지 않습니다.
+> `create_agent_role()`은 배포 경로에서 제거되었습니다. `create_lambda_role()`, `create_agentcore_memory_role()` 함수는 코드에 남아 있으나 `main()`에서는 호출되지 않습니다. uninstaller는 기존 `role-agent-for-…` 정리를 위해 이름 목록을 유지합니다.
 
 #### Knowledge Base 역할 Trust Policy
 
@@ -267,8 +266,8 @@ Runtime installer가 생성·갱신하는 주요 리소스:
 #### `create_s3_bucket()`
 S3 버킷 생성, CORS·퍼블릭 액세스 차단, **versioning Enabled**
 
-#### `create_knowledge_base_role()` / `create_agent_role()` / `create_ecs_roles()` / `create_agentcore_websearch_gateway_role()`
-각 서비스별 IAM 역할 및 인라인 정책 생성. KB 역할은 Trust Policy 갱신 후 `wait_for_iam_role_propagation()` 호출.
+#### `create_knowledge_base_role()` / `create_ecs_roles()` / `create_agentcore_websearch_gateway_role()`
+각 서비스별 IAM 역할 및 least-privilege 인라인 정책 생성. KB 역할은 Trust Policy 갱신 후 `wait_for_iam_role_propagation()` 호출. 재설치 시 `delete_inline_policies_if_present()`로 구버전 광범위 정책을 제거합니다.
 
 #### `create_s3_vectors_store()` / `create_knowledge_base_with_s3_vectors()`
 S3 Vectors 벡터 버킷·인덱스 생성 및 Bedrock Knowledge Base 연결 (assume 실패 시 재시도)
