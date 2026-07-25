@@ -267,7 +267,7 @@ Runtime installer가 생성·갱신하는 주요 리소스:
 S3 버킷 생성, CORS·퍼블릭 액세스 차단, **versioning Enabled**
 
 #### `create_knowledge_base_role()` / `create_ecs_roles()` / `create_agentcore_websearch_gateway_role()`
-각 서비스별 IAM 역할 및 least-privilege 인라인 정책 생성. KB 역할은 Trust Policy 갱신 후 `wait_for_iam_role_propagation()` 호출. 재설치 시 `delete_inline_policies_if_present()`로 구버전 광범위 정책을 제거합니다.
+각 서비스별 IAM 역할 및 least-privilege 인라인 정책 생성. KB 역할은 Trust Policy 갱신 후 `wait_for_iam_role_propagation()` 호출.
 
 #### `create_s3_vectors_store()` / `create_knowledge_base_with_s3_vectors()`
 S3 Vectors 벡터 버킷·인덱스 생성 및 Bedrock Knowledge Base 연결 (assume 실패 시 재시도)
