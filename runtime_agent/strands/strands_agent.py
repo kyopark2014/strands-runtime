@@ -1053,7 +1053,11 @@ class MCPClientManager:
                                             logger.warning(f"Error stopping client: {stop_error}")
                             except:
                                 pass
-                            raise
+                            # Skip this MCP client so one broken tool does not kill the stream.
+                            logger.error(
+                                "Skipping failed MCP client and continuing with remaining tools"
+                            )
+                            continue
                     yield
             else:
                 yield
