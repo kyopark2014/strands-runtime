@@ -41,6 +41,7 @@ def run_agent(
     skill_list=None,
     strands_tools=None,
     guardrail_enabled=None,
+    memory_enabled=None,
     files=None,
 ):
     """Dispatch agent calls to AgentCore runtime only."""
@@ -58,5 +59,6 @@ def run_agent(
         skill_list=skill_list,
         strands_tools=strands_tools,
         guardrail_enabled=guardrail_enabled,
+        memory_enabled=memory_enabled,
         files=files,
     )

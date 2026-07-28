@@ -143,8 +143,14 @@ async def agent_strands(payload):
         reasoningMode=payload.get("reasoning_mode", chat.reasoning_mode),
         skillMode=skill_mode,
         guardrailEnabled=payload.get("guardrail_enabled"),
+        memoryEnabled=payload.get("memory_enabled"),
     )
     logger.info(f"guardrail_enabled: {chat.guardrail_enabled}")
+    logger.info(f"memory_enabled: {chat.memory_enabled}")
+
+    if chat.memory_enabled and "memory" not in mcp_servers:
+        mcp_servers = list(mcp_servers) + ["memory"]
+        logger.info(f"mcp_servers (memory appended): {mcp_servers}")
 
     if query and chat.guardrail_enabled and not chat.uses_converse_guardrail():
         blocked, blocked_message = chat.check_input_guardrail(query)
@@ -165,6 +171,7 @@ async def agent_strands(payload):
         or strands_agent.selected_session_id != strands_agent.get_runtime_session_id()
         or strands_agent.selected_guardrail_enabled != chat.guardrail_enabled
         or strands_agent.selected_model_name != chat.model_name
+        or strands_agent.selected_user_id != chat.user_id
         or strands_agent.agent is None
     )
     if needs_agent:
@@ -175,6 +182,7 @@ async def agent_strands(payload):
         strands_agent.selected_session_id = strands_agent.get_runtime_session_id()
         strands_agent.selected_guardrail_enabled = chat.guardrail_enabled
         strands_agent.selected_model_name = chat.model_name
+        strands_agent.selected_user_id = chat.user_id
 
         strands_agent.mcp_manager.stop_agent_clients()
         strands_agent.agent = strands_agent.create_agent(
@@ -296,6 +304,9 @@ async def agent_strands(payload):
             "messages": result_text if result_text else "답변을 찾지 못하였습니다.",
             "image_url": image_urls,
         }
+
+        if chat.memory_enabled:
+            chat.save_to_memory(query, result_text)
 
     yield {"result": final_output}
 

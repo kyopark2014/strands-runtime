@@ -239,6 +239,7 @@ def _run_agent_thread(
     skill_list: list[str],
     strands_tools: list[str],
     guardrail_enabled: bool,
+    memory_enabled: bool,
     runtime_session_id: str,
     files: list[str],
     message_queue: queue.Queue,
@@ -258,6 +259,7 @@ def _run_agent_thread(
             skill_list=skill_list,
             strands_tools=strands_tools,
             guardrail_enabled=guardrail_enabled,
+            memory_enabled=memory_enabled,
             files=files,
         )
         if not isinstance(response, str):
@@ -301,6 +303,7 @@ def chat_stream(task_id: str, body: ChatRequest, request: Request):
             "skill_list": task["skills"],
             "strands_tools": task.get("strands_tools") or [],
             "guardrail_enabled": task["guardrail_enabled"],
+            "memory_enabled": task["memory_enabled"],
             "runtime_session_id": task["runtime_session_id"],
             "files": files,
             "message_queue": message_queue,

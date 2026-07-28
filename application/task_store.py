@@ -44,6 +44,7 @@ def init_db() -> None:
               skills_json TEXT,
               mcp_servers_json TEXT,
               guardrail_enabled INTEGER DEFAULT 0,
+              memory_enabled INTEGER DEFAULT 1,
               created_at TEXT,
               updated_at TEXT
             );
@@ -73,6 +74,10 @@ def init_db() -> None:
             conn.execute("ALTER TABLE tasks ADD COLUMN strands_tools_json TEXT")
         except sqlite3.OperationalError:
             pass
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN memory_enabled INTEGER DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass
 
 
 def _after_write() -> None:
@@ -89,6 +94,7 @@ def _row_to_task(row: sqlite3.Row) -> dict[str, Any]:
         "skills": json.loads(row["skills_json"] or "[]"),
         "mcp_servers": json.loads(row["mcp_servers_json"] or "[]"),
         "guardrail_enabled": bool(row["guardrail_enabled"]),
+        "memory_enabled": bool(row["memory_enabled"]) if "memory_enabled" in row.keys() else True,
         "strands_tools": json.loads(row["strands_tools_json"] or "[]") if "strands_tools_json" in row.keys() else [],
         "pinned": bool(row["pinned"]) if "pinned" in row.keys() else False,
         "created_at": row["created_at"],
@@ -159,6 +165,7 @@ def create_task(
     mcp_servers: list[str] | None = None,
     strands_tools: list[str] | None = None,
     guardrail_enabled: bool = False,
+    memory_enabled: bool = True,
     title: str = "New task",
 ) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
@@ -170,8 +177,8 @@ def create_task(
             INSERT INTO tasks (
               id, user_id, title, runtime_session_id, model_name,
               skills_json, mcp_servers_json, strands_tools_json, guardrail_enabled,
-              created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+              memory_enabled, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -183,6 +190,7 @@ def create_task(
                 json.dumps(mcp_servers or [], ensure_ascii=False),
                 json.dumps(strands_tools or [], ensure_ascii=False),
                 1 if guardrail_enabled else 0,
+                1 if memory_enabled else 0,
                 now,
                 now,
             ),
@@ -198,6 +206,7 @@ def update_task(task_id: str, user_id: str, **fields: Any) -> dict[str, Any] | N
         "title": "title",
         "model_name": "model_name",
         "guardrail_enabled": "guardrail_enabled",
+        "memory_enabled": "memory_enabled",
         "pinned": "pinned",
     }
     sets: list[str] = []
@@ -207,6 +216,8 @@ def update_task(task_id: str, user_id: str, **fields: Any) -> dict[str, Any] | N
         if key in fields and fields[key] is not None:
             value = fields[key]
             if key == "guardrail_enabled":
+                value = 1 if value else 0
+            if key == "memory_enabled":
                 value = 1 if value else 0
             if key == "pinned":
                 value = 1 if value else 0

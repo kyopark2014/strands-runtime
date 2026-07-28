@@ -3,7 +3,7 @@
 Recall home / residence location from AgentCore memory.
 
 Used by korea-weather when the user does not name a place.
-Requires application/mcp_memory.py (AGENTCORE_USER_ID optional).
+Requires mcp_memory.py in the runtime working directory (AGENTCORE_USER_ID optional).
 """
 from __future__ import annotations
 

@@ -90,8 +90,12 @@ bedrock_region = config.get("region", "us-west-2")
 reasoning_mode = 'Disable'
 skill_mode = 'Disable'
 guardrail_enabled = True
+memory_enabled = False
+memory_id = None
+actor_id = None
+session_id = None
 
-# Memory related variables
+# Local short-term chat memory (not AgentCore Memory)
 MSG_LENGTH = 100
 map_chain = dict()
 memory_chain = None
@@ -137,9 +141,10 @@ def update(
     reasoningMode=None,
     skillMode=None,
     guardrailEnabled=None,
+    memoryEnabled=None,
 ):
     global model_name, model_id, model_type, reasoning_mode, debug_mode, skill_mode
-    global models, user_id, bedrock_region, guardrail_enabled
+    global models, user_id, bedrock_region, guardrail_enabled, memory_enabled
 
     if userId is not None and userId != user_id:
         user_id = userId
@@ -170,6 +175,10 @@ def update(
     if guardrailEnabled is not None and guardrail_enabled != guardrailEnabled:
         guardrail_enabled = guardrailEnabled
         logger.info(f"guardrail_enabled: {guardrail_enabled}")
+
+    if memoryEnabled is not None and memory_enabled != memoryEnabled:
+        memory_enabled = memoryEnabled
+        logger.info(f"memory_enabled: {memory_enabled}")
 
 def _guardrail_config() -> dict | None:
     if not guardrail_enabled:
@@ -347,13 +356,18 @@ def traslation(chat, text, input_language, output_language):
 def initiate():
     global memory_chain, map_chain, user_id
 
-    user_id = uuid.uuid4().hex
-    
-    # general conversation memory
-    if user_id in map_chain:  
+    # Preserve the logged-in user_id for AgentCore Memory actor isolation.
+    # Do NOT replace it with a random UUID.
+    effective_user_id = user_id if user_id and str(user_id).strip() else "default"
+    if effective_user_id != user_id:
+        user_id = effective_user_id
+        logger.info(f"user_id fallback for local memory: {user_id}")
+
+    # general conversation memory (local short-term, not AgentCore Memory)
+    if user_id in map_chain:
         logger.info(f"memory exist. reuse it!")
         memory_chain = map_chain[user_id]
-    else: 
+    else:
         logger.info(f"memory not exist. create new memory!")
         memory_chain = SimpleMemory(k=5)
         map_chain[user_id] = memory_chain
@@ -1966,3 +1980,58 @@ def summarize_image(image_content: bytes, prompt: str) -> str:
     logger.info(f"image summary: {summary}")
 
     return summary
+
+
+#########################################################
+# AgentCore Memory
+#########################################################
+import agentcore_memory
+
+
+def initiate_memory():
+    """Load or create AgentCore Memory session variables for the current user."""
+    global memory_id, actor_id, session_id
+
+    effective_user_id = user_id if user_id and str(user_id).strip() else "default"
+    logger.info(f"initiate_memory for user_id: {effective_user_id}")
+
+    memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(
+        effective_user_id
+    )
+    if not namespace:
+        namespace = f"/users/{actor_id}/preferences"
+    logger.info(
+        f"memory_id: {memory_id}, actor_id: {actor_id}, "
+        f"session_id: {session_id}, namespace: {namespace}"
+    )
+
+    if memory_id is None:
+        memory_id = agentcore_memory.retrieve_memory_id()
+        if memory_id is None:
+            logger.info("Memory will be created...")
+            memory_id = agentcore_memory.create_memory()
+            logger.info(f"Memory was created... {memory_id}")
+
+    agentcore_memory.create_strategy_if_not_exists(memory_id)
+
+
+def save_to_memory(query, result):
+    """Save conversation to AgentCore Memory when memory_enabled is True."""
+    global memory_id, actor_id, session_id
+
+    if not memory_enabled:
+        return
+
+    try:
+        expected_actor = agentcore_memory.resolve_memory_actor_id(
+            user_id if user_id and str(user_id).strip() else "default"
+        )
+        if memory_id is None or actor_id != expected_actor:
+            initiate_memory()
+
+        agentcore_memory.save_conversation_to_memory(
+            memory_id, actor_id, session_id, query, result
+        )
+        logger.info(f"Saved conversation to AgentCore Memory for actor_id={actor_id}")
+    except Exception as e:
+        logger.error(f"Failed to save conversation to AgentCore Memory: {e}")

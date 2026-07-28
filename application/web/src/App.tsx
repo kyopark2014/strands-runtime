@@ -121,6 +121,7 @@ export default function App() {
               skills: config.default_skills,
               mcp_servers: config.default_mcp_servers,
               strands_tools: config.default_strands_tools,
+              memory_enabled: true,
             });
           })();
         }
@@ -207,6 +208,7 @@ export default function App() {
       mcp_servers: activeTask?.mcp_servers ?? config.default_mcp_servers,
       strands_tools: activeTask?.strands_tools ?? config.default_strands_tools,
       guardrail_enabled: activeTask?.guardrail_enabled ?? false,
+      memory_enabled: activeTask?.memory_enabled ?? true,
     });
     setTasks((prev) => [task, ...prev]);
     setActiveTaskId(task.id);
@@ -239,6 +241,7 @@ export default function App() {
       skills: config.default_skills,
       mcp_servers: config.default_mcp_servers,
       strands_tools: config.default_strands_tools,
+      memory_enabled: true,
     });
     setTasks([task]);
     setActiveTaskId(task.id);

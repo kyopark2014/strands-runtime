@@ -60,14 +60,17 @@ BASE_SYSTEM_PROMPT = (
     "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다.\n"
     "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다.\n"
     "모르는 질문을 받으면 솔직히 모른다고 말합니다.\n"
-    "한국어로 답변하세요.\n\n"
+    "한국어로 답변하세요.\n"
+    "답변 전에 개인 맥락이 필요하면 recall_memory(action=\"retrieve\", query=<사용자 질문>)를 "
+    "1회 이상 호출하세요. 추측하지 말고 Memory에서 먼저 확인합니다.\n\n"
     "## Agent Workflow\n"
     "1. 사용자 입력을 받는다\n"
-    "2. 요청에 맞는 skill이 있으면 skills 도구로 해당 skill의 상세 지침을 로드한다\n"
-    "3. skill 지침에 따라 file_read, file_write, execute_code, bash 등의 도구를 사용하여 작업을 수행한다\n"
-    "4. execute_code와 bash의 작업 디렉터리는 application/artifacts/이다. 결과 파일은 이 디렉터리에 파일명만으로 저장한다 (예: report.docx, chart.png)\n"
-    "5. 있으면 upload_file_to_s3로 업로드하여 URL을 제공한다\n"
-    "6. 최종 결과를 사용자에게 전달한다\n"
+    "2. 개인 정보·선호·이전 맥락이 필요하면 recall_memory로 Memory를 조회한다\n"
+    "3. 요청에 맞는 skill이 있으면 skills 도구로 해당 skill의 상세 지침을 로드한다\n"
+    "4. skill 지침에 따라 file_read, file_write, execute_code, bash 등의 도구를 사용하여 작업을 수행한다\n"
+    "5. execute_code와 bash의 작업 디렉터리는 application/artifacts/이다. 결과 파일은 이 디렉터리에 파일명만으로 저장한다 (예: report.docx, chart.png)\n"
+    "6. 있으면 upload_file_to_s3로 업로드하여 URL을 제공한다\n"
+    "7. 최종 결과를 사용자에게 전달한다\n"
 )
 
 
@@ -1096,7 +1099,9 @@ def init_mcp_clients(mcp_servers: list):
             name = tool  # Use tool name as client name
             command = server_config["command"]
             args = server_config["args"]
-            env = server_config.get("env", {})  # Use empty dict if env is not present            
+            env = dict(server_config.get("env") or {})
+            if name == "memory":
+                env["AGENTCORE_USER_ID"] = chat.user_id if chat.user_id else "default"
             logger.info(f"name: {name}, command: {command}, args: {args}, env: {env}")
 
             # Skip if command is a file path and the executable doesn't exist
@@ -1233,6 +1238,7 @@ selected_skill_mode = None
 selected_session_id = None
 selected_guardrail_enabled = None
 selected_model_name = None
+selected_user_id = None
 agent = None
 
 # OpenAI/Mantle reasoning and unsigned thinking cannot be replayed to Claude/Nova.
@@ -1326,7 +1332,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
     image_url = []
     references = []
 
-    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id, selected_guardrail_enabled, selected_model_name
+    global agent, selected_strands_tools, selected_mcp_servers, selected_skill_list, selected_skill_mode, selected_session_id, selected_guardrail_enabled, selected_model_name, selected_user_id
 
     current_skill_mode = chat.skill_mode
     current_session_id = get_runtime_session_id()
@@ -1338,6 +1344,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         or selected_session_id != current_session_id
         or selected_guardrail_enabled != chat.guardrail_enabled
         or selected_model_name != chat.model_name
+        or selected_user_id != chat.user_id
         or agent is None
     ):
         selected_strands_tools = list(strands_tools)
@@ -1347,6 +1354,7 @@ async def run_strands_agent(query: str, strands_tools: list[str], mcp_servers: l
         selected_session_id = current_session_id
         selected_guardrail_enabled = chat.guardrail_enabled
         selected_model_name = chat.model_name
+        selected_user_id = chat.user_id
         
         mcp_manager.stop_agent_clients()
         

@@ -2,7 +2,8 @@
   "MCP": [
     "web_fetch",
     "websearch",
-    "aws documentation"
+    "aws documentation",
+    "memory"
   ],
   "SKILL": [
     "skill-creator",

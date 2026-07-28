@@ -8,6 +8,7 @@ export interface Task {
   mcp_servers: string[];
   strands_tools: string[];
   guardrail_enabled: boolean;
+  memory_enabled: boolean;
   pinned: boolean;
   created_at: string;
   updated_at: string;
