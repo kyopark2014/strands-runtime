@@ -477,7 +477,7 @@ python installer.py
 확인:
 
 1. CloudFront에서 태스크 생성·채팅 후 ECS 서비스 재배포
-2. 재배포 후 동일 User ID로 태스크·메시지 목록 유지
+2. 재배포 후 동일 Cognito 사용자로 태스크·메시지 목록 유지
 3. S3 bucket: `agentcore-sessions/application-database/{projectName}/tasks.db` 객체 존재
 4. CloudWatch 로그: `Restored task DB from S3 Files` / `Persisted task DB to S3 Files`
 
@@ -1543,6 +1543,20 @@ SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회
 삭제 시 `uninstaller.py`의 `delete_alb_origin_header_secret()`이 해당 시크릿을 제거합니다.
 
 
+### Cognito 사용자 인증 (Web UI 로그인)
+
+Web UI 로그인은 **Amazon Cognito USER_PASSWORD_AUTH**를 사용합니다. installer가 Cognito User Pool, App Client, admin 사용자를 자동 생성하고, 세션은 **HMAC-signed 쿠키**(`session_cookie.py`)로 유지됩니다.
+
+| 항목 | 내용 |
+|------|------|
+| User Pool | `installer.py` → `create_cognito_user_pool()` |
+| App Client | `{project_name}-web-ui`, `USER_PASSWORD_AUTH` / `SRP_AUTH` / `REFRESH_TOKEN` |
+| 세션 쿠키 | `SESSION_SIGNING_KEY` (Secrets Manager HMAC key) → `v1.<payload>.<sig>` |
+| ECS 주입 | task-definition `secrets` (ARN), 평문 environment 아님 |
+| 사용자 추가 | `python add_user.py --username <user> --password <pw>` |
+| 삭제 | `uninstaller.delete_cognito_user_pool()` + `delete_session_signing_key_secret()` |
+
+
 ### CloudFront Signed Cookies (S3 `/artifacts` · `/docs` · `/images`)
 
 `sharing_url`로 내려주는 파일 링크는 같은 CloudFront 도메인의 S3 오리진 path입니다. 이 path를 인터넷에 공개하지 않기 위해 **CloudFront Signed Cookies**를 사용합니다.
@@ -1569,13 +1583,13 @@ SG만으로는 공격자가 **자체 CloudFront**를 ALB DNS에 연결해 우회
 2. **최소 Action** — `bedrock:*`, `s3:*`, `ec2:*` 같은 서비스 와일드카드를 쓰지 않고, Invoke·Retrieve·Get/Put 등 필요한 Action만 허용합니다.
 3. **Resource 스코프** — `Resource: "*"` 대신 프로젝트 S3 버킷, Knowledge Base, Runtime/Gateway ARN, AOSS `collection/*`, Tavily secret 등 **이 배포의 리소스**로 한정합니다.
 4. **조건·Trust 축소** — Gateway·**AgentCore Runtime**은 `SourceAccount`/`SourceArn`, S3 Files는 Access Point ARN condition, ECS Task trust는 `ecs-tasks.amazonaws.com`만 허용합니다. AgentCore Runtime trust는 **account root를 포함하지 않습니다**.
-5. **죽은 권한 제거** — 미사용 역할(`create_agent_role`)과 CE/Lambda/Cognito 등 코드에서 쓰지 않는 정책을 제거합니다.
+5. **죽은 권한 제거** — 미사용 역할(`create_agent_role`)과 CE/Lambda 등 코드에서 쓰지 않는 정책을 제거합니다.
 
 installer가 만드는 **런타임 역할** 요약:
 
 | 역할 | 축소 요지 |
 |------|-----------|
-| ECS Task Role (`role-ecs-task-for-…`) | Bedrock Invoke/Mantle/KB ingest, AgentCore `InvokeAgentRuntime`을 **프로젝트 runtime 이름**으로 한정, 프로젝트 S3 버킷만 |
+| ECS Task Role (`role-ecs-task-for-…`) | Bedrock Invoke/Mantle/KB ingest, AgentCore `InvokeAgentRuntime`을 **프로젝트 runtime 이름**으로 한정, 프로젝트 S3 버킷만, Cognito `InitiateAuth`/`GetUser` |
 | Knowledge Base Role | `bedrock:InvokeModel`(+inference profile), 프로젝트 S3 Get/List, `aoss:APIAccessAll`을 `collection/*`로 한정 |
 | AgentCore Runtime Role (`AmazonBedrockAgentCoreRuntimePolicyFor…`) | Trust: `bedrock-agentcore` + `SourceAccount`/`SourceArn`(프로젝트 runtime). 권한: 프로젝트 runtime ARN, Tavily secret만, 프로젝트 S3, Gateway/workload-identity, VPC ENI·ECR·로그 |
 | Websearch Gateway Role | `SourceAccount`/`SourceArn` 조건 유지 |

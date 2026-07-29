@@ -1070,6 +1070,14 @@ select {
   font-size: 14px;
 }
 
+.modal-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
 .modal input {
   width: 100%;
   padding: 10px 12px;
