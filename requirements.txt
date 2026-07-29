@@ -21,6 +21,7 @@ opensearch-py
 mcp
 wikipedia
 aioboto3
+aiohttp>=3.14.1,<4.0.0
 requests
 uv
 kaleido
