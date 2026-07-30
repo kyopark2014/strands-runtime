@@ -7,6 +7,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-dev \
     nodejs \
     npm \
+    pandoc \
+    poppler-utils \
+    libreoffice-writer \
+    libreoffice-calc \
+    libreoffice-impress \
+    fonts-liberation \
+    tesseract-ocr \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -20,10 +27,11 @@ RUN pip install "mcp>=1.9.0,<2"
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
 RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
-RUN pip install colorama rich
+RUN pip install colorama rich defusedxml lxml "markitdown[pptx]" python-pptx pdf2image pytesseract
 
 # Skills that use docx-js / pptxgenjs via bash/node (local install for require())
-RUN npm install docx pptxgenjs
+# pptx skill also uses react-icons + sharp for icon rasterization
+RUN npm install docx pptxgenjs react react-dom react-icons sharp
 ENV NODE_PATH=/app/node_modules
 
 # OpenTelemetry (ADOT + Strands telemetry for AgentCore Evaluations)
