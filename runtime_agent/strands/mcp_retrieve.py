@@ -62,7 +62,35 @@ bedrock_agent_runtime_client = create_boto3_client(
 )
 
 
-def _bedrock_retrieve_pages(query, kb_id):
+def _current_user_id() -> str:
+    """User id injected into the MCP process env by init_mcp_clients()."""
+    return (os.environ.get("AGENTCORE_USER_ID") or "").strip()
+
+
+def _owner_filter(user_id: str) -> dict:
+    """Filter so only documents whose STRING_LIST ``owner`` contains user_id.
+
+    Uses listContains (Bedrock Knowledge Base metadata filter for string lists).
+    See: https://docs.aws.amazon.com/bedrock/latest/userguide/kb-test-config.html
+    """
+    return {
+        "listContains": {
+            "key": "owner",
+            "value": user_id,
+        }
+    }
+
+
+def _retrieval_configuration(user_id: str) -> dict:
+    return {
+        "vectorSearchConfiguration": {
+            "numberOfResults": number_of_results,
+            "filter": _owner_filter(user_id),
+        }
+    }
+
+
+def _bedrock_retrieve_pages(query, kb_id, user_id):
     """Call Bedrock retrieve, following nextToken until exhausted or page cap."""
     retrieval_results = []
     next_token = None
@@ -70,9 +98,7 @@ def _bedrock_retrieve_pages(query, kb_id):
         params = {
             "retrievalQuery": {"text": query},
             "knowledgeBaseId": kb_id,
-            "retrievalConfiguration": {
-                "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-            },
+            "retrievalConfiguration": _retrieval_configuration(user_id),
         }
         if next_token:
             params["nextToken"] = next_token
@@ -134,9 +160,19 @@ def _resolve_knowledge_base_id():
 
 def retrieve(query):
     global knowledge_base_id
-    
+
+    user_id = _current_user_id()
+    if not user_id:
+        logger.error("AGENTCORE_USER_ID is empty; refusing unscoped RAG retrieve")
+        return json.dumps(
+            {"error": "User session required for RAG retrieve"},
+            ensure_ascii=False,
+        )
+
+    logger.info("RAG retrieve for user_id=%s query=%s", user_id, query)
+
     try:
-        retrieval_results = _bedrock_retrieve_pages(query, knowledge_base_id)
+        retrieval_results = _bedrock_retrieve_pages(query, knowledge_base_id, user_id)
     except ClientError as e:
         error_code = e.response.get("Error", {}).get("Code", "")
         
@@ -155,7 +191,9 @@ def retrieve(query):
                     logger.warning("Failed to persist knowledge_base_id: %s", write_err)
                 logger.info(f"Updated knowledge_base_id to: {new_knowledge_base_id}")
                 try:
-                    retrieval_results = _bedrock_retrieve_pages(query, knowledge_base_id)
+                    retrieval_results = _bedrock_retrieve_pages(
+                        query, knowledge_base_id, user_id
+                    )
                     logger.info("Retry successful after updating knowledge_base_id")
                 except Exception as retry_error:
                     logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")

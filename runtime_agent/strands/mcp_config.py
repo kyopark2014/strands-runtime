@@ -152,6 +152,7 @@ def load_config(mcp_type):
                 "kb-retriever": {
                     "command": "python",
                     "args": [f"{workingDir}/mcp_server_retrieve.py"],
+                    # AGENTCORE_USER_ID is injected at runtime in init_mcp_clients()
                     "env": _stdio_env(PYTHONPATH=workingDir),
                 }
             }

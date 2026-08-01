@@ -382,7 +382,7 @@ def init_mcp_clients(mcp_servers: list):
             command = server_config["command"]
             args = server_config["args"]
             env = dict(server_config.get("env") or {})
-            if name == "memory":
+            if name in ("memory", "kb-retriever"):
                 env["AGENTCORE_USER_ID"] = chat.user_id if chat.user_id else "default"
             logger.info(f"name: {name}, command: {command}, args: {args}, env: {env}")
 
