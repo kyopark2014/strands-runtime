@@ -152,10 +152,14 @@ def _build_model(model_id: str, region: str) -> BedrockModel:
         "max_tokens": 256,
         **sa._prompt_cache_kwargs("claude"),
     }
-    # claude-sonnet-5 / fable reject temperature (adaptive thinking path).
+    # Claude 5 / fable reject temperature (adaptive thinking path).
+    mid = model_id.lower()
     if not (
-        "claude-sonnet-5" in model_id
-        or "fable" in model_id.lower()
+        "claude-sonnet-5" in mid
+        or "claude-5-sonnet" in mid
+        or "claude-opus-5" in mid
+        or "claude-5-opus" in mid
+        or "fable" in mid
     ):
         kwargs["temperature"] = 0.1
     return BedrockModel(**kwargs)
