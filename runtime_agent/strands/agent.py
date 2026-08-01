@@ -231,6 +231,7 @@ async def _run_agent_strands(payload):
     streamed_text = ""
     image_urls: list = []
     tool_names: dict[str, str] = {}
+    stop_reason: str | None = None
 
     with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
         try:
@@ -245,6 +246,9 @@ async def _run_agent_strands(payload):
 
                 elif "result" in event:
                     final = event["result"]
+                    stop_reason = getattr(final, "stop_reason", None)
+                    if stop_reason:
+                        logger.info(f"[stop_reason] {stop_reason}")
                     message = final.message
                     if message:
                         content = message.get("content", [])
@@ -315,12 +319,35 @@ async def _run_agent_strands(payload):
             if not (result_text or "").strip() and streamed_text.strip():
                 result_text = streamed_text
 
+            skip_memory = False
+            if not (result_text or "").strip():
+                if stop_reason == "content_filtered":
+                    result_text = (
+                        "요청이 모델 안전 정책에 의해 차단되었습니다. "
+                        "다른 모델로 시도하거나 질문을 바꿔 주세요."
+                    )
+                    skip_memory = True
+                elif stop_reason == "guardrail_intervened":
+                    result_text = (
+                        "요청이 Guardrail 안전 정책에 의해 차단되었습니다. "
+                        "질문을 바꿔 주세요."
+                    )
+                    skip_memory = True
+                elif stop_reason == "refusal":
+                    result_text = (
+                        "모델이 이 요청에 대한 응답을 거부했습니다. "
+                        "다른 모델로 시도하거나 질문을 바꿔 주세요."
+                    )
+                    skip_memory = True
+                else:
+                    result_text = "답변을 찾지 못하였습니다."
+
             final_output = {
-                "messages": result_text if result_text else "답변을 찾지 못하였습니다.",
+                "messages": result_text,
                 "image_url": image_urls,
             }
 
-            if chat.memory_enabled:
+            if chat.memory_enabled and not skip_memory:
                 chat.save_to_memory(query, final_output["messages"])
         except Exception:
             logger.exception("Agent stream_async failed")
