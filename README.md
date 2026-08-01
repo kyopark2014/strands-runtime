@@ -1589,6 +1589,10 @@ Web UI 로그인은 **Amazon Cognito USER_PASSWORD_AUTH**를 사용합니다. in
 
 기본 ALB behavior(앱 API·SPA)에는 TrustedKeyGroups를 걸지 않습니다.
 
+### ALB stickiness cookies
+
+타겟 그룹 stickiness는 **application cookie**(`agent_user_id`)를 사용합니다.  
+`lb_cookie`가 발급하던 `AWSALB`/`AWSALBCORS`는 Secure·HttpOnly를 설정할 수 없어 사용하지 않습니다 ([AWS](https://repost.aws/knowledge-center/elb-secure-flag-alb-cookies)).
 
 ### IAM least privilege
 
