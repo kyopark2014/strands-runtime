@@ -34,14 +34,35 @@ export interface Message {
 
 export interface AppConfig {
   projectName: string;
+  /** Present only after authentication. */
+  skills?: string[];
+  mcp_servers?: string[];
+  strands_tools?: string[];
+  models?: string[];
+  default_model?: string;
+  default_skills?: string[];
+  default_mcp_servers?: string[];
+  default_strands_tools?: string[];
+}
+
+/** True when /api/config returned authenticated capability catalogs. */
+export function hasAuthenticatedConfig(
+  config: AppConfig | null | undefined,
+): config is AppConfig & {
   skills: string[];
   mcp_servers: string[];
   strands_tools: string[];
   models: string[];
   default_model: string;
-  default_skills: string[];
-  default_mcp_servers: string[];
-  default_strands_tools: string[];
+} {
+  return Boolean(
+    config &&
+      Array.isArray(config.skills) &&
+      Array.isArray(config.mcp_servers) &&
+      Array.isArray(config.strands_tools) &&
+      Array.isArray(config.models) &&
+      typeof config.default_model === "string",
+  );
 }
 
 export interface StreamEvent {

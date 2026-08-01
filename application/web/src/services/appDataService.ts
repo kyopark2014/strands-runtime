@@ -88,9 +88,9 @@ export const appDataService = {
       if (latest.length > 0) return latest[0];
       return await api.createTask({
         model_name: config.default_model,
-        skills: config.default_skills,
-        mcp_servers: config.default_mcp_servers,
-        strands_tools: config.default_strands_tools,
+        skills: config.default_skills ?? [],
+        mcp_servers: config.default_mcp_servers ?? [],
+        strands_tools: config.default_strands_tools ?? [],
         memory_enabled: true,
       });
     } catch (error) {
