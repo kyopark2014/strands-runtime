@@ -20,8 +20,10 @@ import posixpath
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path
+from subprocess import TimeoutExpired
 
 import defusedxml.minidom
 from defusedxml import ElementTree
@@ -39,6 +41,24 @@ GRID_PADDING = 20
 BORDER_WIDTH = 2
 FONT_SIZE_RATIO = 0.10
 LABEL_PADDING_RATIO = 0.4
+SUBPROCESS_MAX_ATTEMPTS = 3
+SUBPROCESS_RETRY_BASE_DELAY_SECONDS = 0.5
+
+
+def _retry_subprocess(operation: str, fn):
+    """Retry transient subprocess failures with exponential backoff."""
+    last_error: BaseException | None = None
+    for attempt in range(1, SUBPROCESS_MAX_ATTEMPTS + 1):
+        try:
+            return fn()
+        except (TimeoutExpired, RuntimeError) as exc:
+            last_error = exc
+            if attempt >= SUBPROCESS_MAX_ATTEMPTS:
+                break
+            delay = SUBPROCESS_RETRY_BASE_DELAY_SECONDS * (2 ** (attempt - 1))
+            time.sleep(delay)
+    assert last_error is not None
+    raise RuntimeError(f"{operation} failed after {SUBPROCESS_MAX_ATTEMPTS} attempts") from last_error
 
 
 def main():
@@ -91,8 +111,8 @@ def main():
             for grid_file in grid_files:
                 print(f"  {grid_file}")
 
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except Exception:
+        print("Error: failed to generate thumbnail", file=sys.stderr)
         sys.exit(1)
 
 
@@ -188,29 +208,40 @@ def create_hidden_placeholder(size: tuple[int, int]) -> Image.Image:
 def convert_to_images(pptx_path: Path, temp_dir: Path) -> list[Path]:
     pdf_path = temp_dir / f"{pptx_path.stem}.pdf"
 
-    result = run_soffice(
-        ["--headless", "--convert-to", "pdf", "--outdir", str(temp_dir), str(pptx_path)],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0 or not pdf_path.exists():
-        detail = (result.stderr or result.stdout or "").strip()
-        raise RuntimeError(f"PDF conversion failed: {detail}" if detail else "PDF conversion failed")
+    def run_pdf_conversion():
+        result = run_soffice(
+            ["--headless", "--convert-to", "pdf", "--outdir", str(temp_dir), str(pptx_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0 or not pdf_path.exists():
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(
+                detail if detail else "PDF conversion failed"
+            )
+        return result
 
-    result = subprocess.run(
-        [
-            "pdftoppm",
-            "-jpeg",
-            "-r",
-            str(CONVERSION_DPI),
-            str(pdf_path),
-            str(temp_dir / "slide"),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise RuntimeError("Image conversion failed")
+    _retry_subprocess("LibreOffice PDF conversion", run_pdf_conversion)
+
+    def run_image_conversion():
+        result = subprocess.run(  # nosec B603 — fixed `pdftoppm` binary + argv list, shell=False
+            [
+                "pdftoppm",
+                "-jpeg",
+                "-r",
+                str(CONVERSION_DPI),
+                str(pdf_path),
+                str(temp_dir / "slide"),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(detail if detail else "Image conversion failed")
+        return result
+
+    _retry_subprocess("pdftoppm image conversion", run_image_conversion)
 
     return sorted(temp_dir.glob("slide-*.jpg"))
 

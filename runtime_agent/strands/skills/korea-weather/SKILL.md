@@ -16,20 +16,21 @@ description: 기상청 날씨누리 동네예보·현재날씨와 에어코리�
 
 ## Script Location
 
-application working directory 기준 전체 경로를 사용하세요.
+`bash` / `execute_code`의 cwd는 `artifacts/`이다. 스킬 스크립트는 `$WORKING_DIR/skills/...`로 호출하세요.
+(`WORKING_DIR`는 bash 도구가 주입하는 환경변수이며, Runtime에서는 `/app`이다.)
 
 | 스크립트 | 용도 |
 | --- | --- |
-| `skills/korea-weather/scripts/recall_home_location.py` | 지역명 미지정 시 memory에서 집/거주 주소 조회 |
-| `skills/korea-weather/scripts/get_weather.py` | 기상청 동네예보·현재날씨·대기질 조회 |
+| `$WORKING_DIR/skills/korea-weather/scripts/recall_home_location.py` | 지역명 미지정 시 memory에서 집/거주 주소 조회 |
+| `$WORKING_DIR/skills/korea-weather/scripts/get_weather.py` | 기상청 동네예보·현재날씨·대기질 조회 |
 
-**IMPORTANT**: `scripts/...`로 줄이지 말고 위 전체 경로를 사용하세요.
+**IMPORTANT**: `skills/...` 또는 `scripts/...` 상대경로를 쓰지 마세요. cwd가 `artifacts/`라 `/app/artifacts/skills/...`로 해석되어 실패합니다. 반드시 `$WORKING_DIR/skills/korea-weather/scripts/...`를 사용하세요.
 
 ## Critical Rules
 
 1. 지역명이 없으면 **먼저** memory로 집/거주 주소를 조회하세요.
    ```bash
-   python skills/korea-weather/scripts/recall_home_location.py
+   python "$WORKING_DIR/skills/korea-weather/scripts/recall_home_location.py"
    ```
    - 주소가 나오면 그 값으로 `get_weather.py`를 실행하세요.
    - `LOCATION_NOT_FOUND`이면 `get_weather.py`를 location 없이 실행해 IP 대략 위치를 시도하세요.
@@ -45,41 +46,41 @@ application working directory 기준 전체 경로를 사용하세요.
 
 ```bash
 # 1) memory에서 집/거주 주소
-loc=$(python skills/korea-weather/scripts/recall_home_location.py)
+loc=$(python "$WORKING_DIR/skills/korea-weather/scripts/recall_home_location.py")
 
 # 2) 주소가 있으면 그 지역으로 날씨 조회
 if [ "$loc" != "LOCATION_NOT_FOUND" ]; then
-  python skills/korea-weather/scripts/get_weather.py "$loc"
+  python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" "$loc"
 else
   # memory 실패 시 IP 폴백(스크립트 내부)
-  python skills/korea-weather/scripts/get_weather.py
+  python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py"
 fi
 ```
 
 JSON 상세 결과:
 
 ```bash
-python skills/korea-weather/scripts/recall_home_location.py --json
+python "$WORKING_DIR/skills/korea-weather/scripts/recall_home_location.py" --json
 ```
 
 ### 현재 위치 별칭(스크립트 내부 memory→IP)
 
 ```bash
-python skills/korea-weather/scripts/get_weather.py "현재위치"
+python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" "현재위치"
 ```
 
 ### 지역명 지정
 
 ```bash
-python skills/korea-weather/scripts/get_weather.py "서울 서초구 반포3동"
-python skills/korea-weather/scripts/get_weather.py "부산 해운대"
-python skills/korea-weather/scripts/get_weather.py "제주"
+python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" "서울 서초구 반포3동"
+python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" "부산 해운대"
+python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" "제주"
 ```
 
 ### 예보구역 stnId
 
 ```bash
-python skills/korea-weather/scripts/get_weather.py --stnid 109
+python "$WORKING_DIR/skills/korea-weather/scripts/get_weather.py" --stnid 109
 ```
 
 | stnId | 대표 지역 |
@@ -97,10 +98,12 @@ python skills/korea-weather/scripts/get_weather.py --stnid 109
 ## Usage (agent)
 
 ```python
+import os
 import subprocess
 
-RECALL = "skills/korea-weather/scripts/recall_home_location.py"
-WEATHER = "skills/korea-weather/scripts/get_weather.py"
+skills = os.path.join(os.environ["WORKING_DIR"], "skills", "korea-weather", "scripts")
+RECALL = os.path.join(skills, "recall_home_location.py")
+WEATHER = os.path.join(skills, "get_weather.py")
 
 # 지역 미지정 → memory 조회 후 날씨
 mem = subprocess.run(["python", RECALL], capture_output=True, text=True)
@@ -142,6 +145,10 @@ print(result.stdout)
 - 공인 IP 지오로케이션(`ip-api.com`) — memory 실패 시 폴백
 
 ## Troubleshooting
+
+### No such file or directory (`.../artifacts/skills/...`)
+
+bash cwd가 `artifacts/`입니다. `skills/...` 상대경로가 아니라 `$WORKING_DIR/skills/korea-weather/scripts/...`로 다시 실행하세요.
 
 ### 지역을 찾을 수 없음
 

@@ -13,8 +13,16 @@ Usage: python extract_form_structure.py <input.pdf> <output.json>
 """
 
 import json
+import logging
 import sys
 import pdfplumber
+
+logger = logging.getLogger(__name__)
+
+# Approximate on-page size (PDF points) for square checkbox glyphs drawn as rects.
+CHECKBOX_MIN_SIZE = 5
+CHECKBOX_MAX_SIZE = 15
+CHECKBOX_ASPECT_TOLERANCE = 2
 
 
 def extract_form_structure(pdf_path):
@@ -57,7 +65,11 @@ def extract_form_structure(pdf_path):
             for rect in page.rects:
                 width = float(rect["x1"]) - float(rect["x0"])
                 height = float(rect["bottom"]) - float(rect["top"])
-                if 5 <= width <= 15 and 5 <= height <= 15 and abs(width - height) < 2:
+                if (
+                    CHECKBOX_MIN_SIZE <= width <= CHECKBOX_MAX_SIZE
+                    and CHECKBOX_MIN_SIZE <= height <= CHECKBOX_MAX_SIZE
+                    and abs(width - height) < CHECKBOX_ASPECT_TOLERANCE
+                ):
                     structure["checkboxes"].append({
                         "page": page_num,
                         "x0": round(float(rect["x0"]), 1),
@@ -97,10 +109,15 @@ def main():
     output_path = sys.argv[2]
 
     print(f"Extracting structure from {pdf_path}...")
-    structure = extract_form_structure(pdf_path)
+    try:
+        structure = extract_form_structure(pdf_path)
 
-    with open(output_path, "w") as f:
-        json.dump(structure, f, indent=2)
+        with open(output_path, "w") as f:
+            json.dump(structure, f, indent=2)
+    except (OSError, ValueError, KeyError) as e:
+        logger.exception("Failed to extract form structure")
+        print("Error: Failed to extract form structure", file=sys.stderr)
+        sys.exit(1)
 
     print(f"Found:")
     print(f"  - {len(structure['pages'])} pages")

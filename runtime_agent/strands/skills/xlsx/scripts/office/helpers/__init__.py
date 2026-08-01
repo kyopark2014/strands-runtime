@@ -18,6 +18,9 @@ OOXML_FAMILY = {
 
 _SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*:")
 
+# ZIP external_attr upper 16 bits hold the Unix file mode (PKWARE APPNOTE).
+ZIP_EXTERNAL_ATTR_UNIX_MODE_SHIFT = 16
+
 SLIDE_REL_TYPE = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide"
 
 
@@ -73,13 +76,17 @@ def rendered_text(text: str, preserve: bool) -> str:
 
 def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     dest = dest.resolve()
-    for m in zf.infolist():
-        if stat.S_ISLNK(m.external_attr >> 16):
-            raise ValueError(f"symlink archive entry not allowed: {m.filename!r}")
-        target = (dest / m.filename).resolve()
+    for zip_member in zf.infolist():
+        if stat.S_ISLNK(
+            zip_member.external_attr >> ZIP_EXTERNAL_ATTR_UNIX_MODE_SHIFT
+        ):
+            raise ValueError(
+                f"symlink archive entry not allowed: {zip_member.filename!r}"
+            )
+        target = (dest / zip_member.filename).resolve()
         if not target.is_relative_to(dest):
-            raise ValueError(f"unsafe archive entry: {m.filename!r}")
-        zf.extract(m, dest)
+            raise ValueError(f"unsafe archive entry: {zip_member.filename!r}")
+        zf.extract(zip_member, dest)
 
 
 def rezip(src_dir: Path, out_path: Path) -> None:

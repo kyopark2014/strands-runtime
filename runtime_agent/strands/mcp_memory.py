@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 AgentCore Memory Tool 
 modified from strands_tools.agent_core_memory: https://github.com/strands-agents/tools/blob/main/src/strands_tools/agent_core_memory.py
@@ -15,7 +29,8 @@ import os
 import sys
 import agentcore_memory
 
-from typing import Dict, List, Optional, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Optional, Set, Tuple
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -26,16 +41,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger("memory")
 
+# Default topK for Bedrock AgentCore retrieve_memory_records semantic search.
+DEFAULT_MEMORY_RETRIEVAL_TOP_K = 20
+# Cap concurrent namespace API calls (Bedrock has no batch namespace API).
+MAX_MEMORY_NAMESPACE_WORKERS = 4
+# Safety fuse for memory record pagination (fail soft with warning if hit).
+MAX_MEMORY_RECORD_PAGES = 50
+
+
+def _paginate_memory_record_pages(fetch_page, *, initial_next_token: Optional[str] = None) -> Dict:
+    """Consume nextToken until exhausted; merge memoryRecordSummaries."""
+    all_summaries: List = []
+    token = initial_next_token
+    last: Dict = {}
+    for _ in range(MAX_MEMORY_RECORD_PAGES):
+        last = fetch_page(next_token=token)
+        all_summaries.extend(last.get("memoryRecordSummaries") or [])
+        token = last.get("nextToken")
+        if not token:
+            break
+    else:
+        if token:
+            logger.warning(
+                "memory pagination stopped after %s pages; more records may exist",
+                MAX_MEMORY_RECORD_PAGES,
+            )
+    merged = dict(last) if last else {}
+    merged["memoryRecordSummaries"] = all_summaries
+    if not token:
+        merged.pop("nextToken", None)
+    else:
+        merged["nextToken"] = token
+    return merged
+
+
+def _client_safe_error(operation: str, exc: Optional[BaseException] = None) -> str:
+    """Return a client-facing message without raw exception / IAM detail leakage."""
+    if exc is not None:
+        return f"{operation} failed ({type(exc).__name__})"
+    return f"{operation} failed"
+
 def load_config():
-    config = None
-    
     script_dir = os.path.dirname(os.path.abspath(__file__))
     config_path = os.path.join(script_dir, "config.json")
-    
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    
-    return config
+    from config_loader import load_json_config
+
+    return load_json_config(config_path)
 
 config = load_config()
 
@@ -153,7 +204,7 @@ def retrieve_memory_records(
     memory_id: str,
     namespace: str,
     search_query: str,
-    max_results: Optional[int] = 20, 
+    max_results: Optional[int] = DEFAULT_MEMORY_RETRIEVAL_TOP_K,
     next_token: Optional[str] = None,
 ) -> Dict:
     """
@@ -167,7 +218,7 @@ def retrieve_memory_records(
         memory_id: ID of the memory store to search in
         namespace: Namespace to search within (e.g., "/users/{actorId}")
         search_query: Natural language query to search for
-        max_results: Maximum return in a single call (default: 20, max: 100)
+        max_results: Maximum return in a single call (default: DEFAULT_MEMORY_RETRIEVAL_TOP_K, max: 100)
         next_token: Pagination token for retrieving additional results
 
     Returns:
@@ -177,8 +228,14 @@ def retrieve_memory_records(
     logger.info(f"memory_id: {memory_id}, namespace: {namespace}, search_query: {search_query}, max_results: {max_results}, next_token: {next_token}")
 
     # Prepare request parameters
-    topK = 20 # Maximum number of top-scoring memory records to return
-    params = {"memoryId": memory_id, "namespace": namespace, "searchCriteria": {"topK":topK, "searchQuery": search_query}}
+    params = {
+        "memoryId": memory_id,
+        "namespace": namespace,
+        "searchCriteria": {
+            "topK": DEFAULT_MEMORY_RETRIEVAL_TOP_K,
+            "searchQuery": search_query,
+        },
+    }
     if max_results is not None:
         params["maxResults"] = max_results
     if next_token is not None:
@@ -277,34 +334,54 @@ def recall_memory(
             if action == "retrieve":
                 contents = []
                 seen = set()
-                errors = []
-                for ns in search_namespaces:
-                    try:
-                        response = retrieve_memory_records(
+                errors: List[str] = []
+                primary_ns = search_namespaces[0] if search_namespaces else None
+
+                def _retrieve_one(ns: str) -> Tuple[str, Dict]:
+                    def _page(*, next_token=None):
+                        return retrieve_memory_records(
                             memory_id=memory_id,
                             namespace=ns,
                             search_query=query,
                             max_results=max_results,
-                            next_token=next_token if ns == search_namespaces[0] else None,
+                            next_token=next_token,
                         )
-                        for content in _extract_contents_from_response(response):
-                            key = json.dumps(content, sort_keys=True, default=str)
-                            if key not in seen:
-                                seen.add(key)
-                                contents.append(content)
-                    except Exception as ns_error:
-                        logger.warning(f"Retrieve failed for namespace {ns}: {ns_error}")
-                        errors.append(f"{ns}: {ns_error}")
+
+                    return ns, _paginate_memory_record_pages(
+                        _page,
+                        initial_next_token=next_token if ns == primary_ns else None,
+                    )
+
+                workers = min(len(search_namespaces), MAX_MEMORY_NAMESPACE_WORKERS) or 1
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(_retrieve_one, ns): ns for ns in search_namespaces
+                    }
+                    for future in as_completed(futures):
+                        ns = futures[future]
+                        try:
+                            _, response = future.result()
+                            for content in _extract_contents_from_response(response):
+                                key = json.dumps(content, sort_keys=True, default=str)
+                                if key not in seen:
+                                    seen.add(key)
+                                    contents.append(content)
+                        except Exception as ns_error:
+                            logger.warning(
+                                f"Retrieve failed for namespace {ns}: {ns_error}",
+                                exc_info=True,
+                            )
+                            errors.append(ns)
 
                 if not contents and errors:
+                    logger.error(
+                        "Memory retrieve failed for all namespaces: %s",
+                        errors,
+                    )
                     return {
                         "status": "error",
                         "content": [{
-                            "text": (
-                                "Memory retrieve failed for all namespaces "
-                                f"(often IAM AccessDenied on RetrieveMemoryRecords): "
-                                f"{'; '.join(errors)}"
-                            )
+                            "text": _client_safe_error("Memory retrieval"),
                         }],
                     }
 
@@ -314,38 +391,66 @@ def recall_memory(
             elif action == "list":
                 relevant_data = {"memoryRecordSummaries": []}
                 seen_ids = set()
-                errors = []
-                for ns in search_namespaces:
-                    try:
-                        response = list_memory_records(
+                errors: List[str] = []
+                primary_ns = search_namespaces[0] if search_namespaces else None
+                # Preserve deterministic merge order (sorted namespaces) despite concurrency.
+                responses_by_ns: Dict[str, Dict] = {}
+
+                def _list_one(ns: str) -> Tuple[str, Dict]:
+                    def _page(*, next_token=None):
+                        return list_memory_records(
                             memory_id=memory_id,
                             namespace=ns,
                             max_results=max_results,
-                            next_token=next_token if ns == search_namespaces[0] else None,
+                            next_token=next_token,
                         )
-                        if isinstance(response, dict):
-                            for summary in response.get("memoryRecordSummaries") or []:
-                                record_id = summary.get("memoryRecordId")
-                                if record_id and record_id in seen_ids:
-                                    continue
-                                if record_id:
-                                    seen_ids.add(record_id)
-                                relevant_data["memoryRecordSummaries"].append(summary)
-                            if "nextToken" in response and ns == search_namespaces[0]:
-                                relevant_data["nextToken"] = response["nextToken"]
-                    except Exception as ns_error:
-                        logger.warning(f"List failed for namespace {ns}: {ns_error}")
-                        errors.append(f"{ns}: {ns_error}")
+
+                    return ns, _paginate_memory_record_pages(
+                        _page,
+                        initial_next_token=next_token if ns == primary_ns else None,
+                    )
+
+                workers = min(len(search_namespaces), MAX_MEMORY_NAMESPACE_WORKERS) or 1
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    futures = {
+                        executor.submit(_list_one, ns): ns for ns in search_namespaces
+                    }
+                    for future in as_completed(futures):
+                        ns = futures[future]
+                        try:
+                            _, response = future.result()
+                            if isinstance(response, dict):
+                                responses_by_ns[ns] = response
+                        except Exception as ns_error:
+                            logger.warning(
+                                f"List failed for namespace {ns}: {ns_error}",
+                                exc_info=True,
+                            )
+                            errors.append(ns)
+
+                for ns in search_namespaces:
+                    response = responses_by_ns.get(ns)
+                    if not response:
+                        continue
+                    for summary in response.get("memoryRecordSummaries") or []:
+                        record_id = summary.get("memoryRecordId")
+                        if record_id and record_id in seen_ids:
+                            continue
+                        if record_id:
+                            seen_ids.add(record_id)
+                        relevant_data["memoryRecordSummaries"].append(summary)
+                    if "nextToken" in response and ns == primary_ns:
+                        relevant_data["nextToken"] = response["nextToken"]
 
                 if not relevant_data["memoryRecordSummaries"] and errors:
+                    logger.error(
+                        "Memory list failed for all namespaces: %s",
+                        errors,
+                    )
                     return {
                         "status": "error",
                         "content": [{
-                            "text": (
-                                "Memory list failed for all namespaces "
-                                f"(often IAM AccessDenied on ListMemoryRecords): "
-                                f"{'; '.join(errors)}"
-                            )
+                            "text": _client_safe_error("Memory list operation"),
                         }],
                     }
 
@@ -374,10 +479,15 @@ def recall_memory(
                     "content": [{"text": f"Unsupported action: {action}. Supported actions: retrieve, list, get"}],
                 }
         except Exception as e:
-            error_msg = f"API error: {str(e)}"
-            logger.error(error_msg)
-            return {"status": "error", "content": [{"text": error_msg}]}
+            logger.error(f"API error in recall_memory: {e}", exc_info=True)
+            return {
+                "status": "error",
+                "content": [{"text": _client_safe_error("Memory operation", e)}],
+            }
 
     except Exception as e:
-        logger.error(f"Unexpected error in recall_memory tool: {str(e)}")
-        return {"status": "error", "content": [{"text": str(e)}]}
+        logger.error(f"Unexpected error in recall_memory tool: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "content": [{"text": _client_safe_error("Unexpected error in memory recall", e)}],
+        }

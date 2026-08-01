@@ -5,6 +5,7 @@ Recalculates all formulas in an Excel file using LibreOffice
 
 import contextlib
 import json
+import logging
 import os
 import platform
 import re
@@ -20,10 +21,19 @@ from office.soffice import get_soffice_env, run_soffice
 
 from openpyxl import load_workbook
 
+logger = logging.getLogger(__name__)
+
 MACRO_FILENAME = "Module1.xba"
 SOFFICE_MISSING = "soffice not found on PATH; LibreOffice is required to recalculate"
 
 MAX_LOCATIONS = 100
+
+SUBPROCESS_TIMEOUT_BUFFER_SECONDS = 15
+# GNU `timeout` exits with 124 when the command times out.
+TIMEOUT_EXIT_CODE = 124
+# Keep at least this many seconds for soffice after macro profile setup so a
+# nearly-exhausted caller timeout still allows one short recalc attempt.
+MIN_RECALC_TIMEOUT_SECONDS = 5
 
 EXTERNAL_REF_RE = re.compile(r"""(?<![\w"\[])'?\[\d+\][^!"\[\]]*'?!""")
 
@@ -40,7 +50,7 @@ RECALCULATE_MACRO = """<?xml version="1.0" encoding="UTF-8"?>
 
 def has_gtimeout():
     try:
-        subprocess.run(
+        subprocess.run(  # nosec B603 — fixed `gtimeout` binary + argv list, shell=False
             ["gtimeout", "--version"], capture_output=True, timeout=1, check=False
         )
         return True
@@ -73,7 +83,8 @@ def setup_libreoffice_macro(profile_dir: Path, timeout=30):
     try:
         (macro_dir / MACRO_FILENAME).write_text(RECALCULATE_MACRO)
     except OSError as e:
-        return None, f"Could not install the recalculation macro: {e}"
+        logger.warning("Could not install the recalculation macro: %s", e)
+        return None, "Could not install the recalculation macro"
 
     return url, None
 
@@ -122,24 +133,33 @@ def external_links_at_risk(filename):
 
 
 def recalc(filename, timeout=30, force=False):
-    if not Path(filename).exists():
+    path = Path(filename).expanduser()
+    try:
+        path = path.resolve()
+    except OSError:
+        return {"error": f"Invalid path: {filename}"}
+    if path.suffix.lower() not in (".xlsx", ".xlsm", ".xls"):
+        return {"error": f"Not a supported spreadsheet: {filename}"}
+    if not path.exists():
         return {"error": f"File {filename} does not exist"}
 
-    abs_path = str(Path(filename).absolute())
+    abs_path = str(path)
 
     if not os.access(abs_path, os.W_OK):
         return {"error": f"{filename} is not writable; recalculation rewrites the file in place"}
 
     try:
         get_soffice_env()
-    except Exception as e:  
-        return {"error": f"Could not prepare the LibreOffice environment: {e}"}
+    except Exception:
+        logger.exception("Could not prepare the LibreOffice environment")
+        return {"error": "Could not prepare the LibreOffice environment"}
 
     if not force:
         try:
             at_risk = external_links_at_risk(filename)
-        except Exception as e:  
-            return {"error": f"Could not inspect {filename} for external links: {e}"}
+        except Exception:
+            logger.exception("Could not inspect workbook for external links")
+            return {"error": "Could not inspect workbook for external links"}
         if at_risk:
             shown = at_risk[:MAX_LOCATIONS]
             return {
@@ -167,7 +187,7 @@ def _recalc_with_profile(filename, abs_path, timeout, profile_dir: Path):
     if err:
         return {"error": err}
 
-    timeout = max(5, int(timeout - (time.monotonic() - started)))
+    timeout = max(MIN_RECALC_TIMEOUT_SECONDS, int(timeout - (time.monotonic() - started)))
 
     before = _stamp(abs_path)
 
@@ -188,20 +208,27 @@ def _recalc_with_profile(filename, abs_path, timeout, profile_dir: Path):
     timed_out = f"LibreOffice timed out after {timeout}s; formulas were NOT recalculated. Re-run with a longer timeout."
 
     try:
-        result = subprocess.run(
-            cmd, capture_output=True, text=True, env=get_soffice_env(), timeout=timeout + 15
+        # Fixed `soffice`/`timeout` binary argv list, shell=False; abs_path validated.
+        # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+        result = subprocess.run(  # nosec B603 — fixed `soffice`/`timeout` binary argv list, shell=False; abs_path validated
+            cmd,
+            capture_output=True,
+            text=True,
+            env=get_soffice_env(),
+            timeout=timeout + SUBPROCESS_TIMEOUT_BUFFER_SECONDS,
         )
     except subprocess.TimeoutExpired:
         return {"error": timed_out}
     except FileNotFoundError:
         return {"error": SOFFICE_MISSING}
 
-    if result.returncode == 124:
+    if result.returncode == TIMEOUT_EXIT_CODE:
         return {"error": timed_out}
 
     if result.returncode != 0:
         detail = (result.stderr or "").strip() or f"soffice exited {result.returncode}"
-        return {"error": f"LibreOffice failed to recalculate: {detail}"}
+        logger.warning("LibreOffice recalc failed: %s", detail)
+        return {"error": "LibreOffice failed to recalculate"}
 
     if _stamp(abs_path) == before:
         return {
@@ -275,8 +302,9 @@ def _recalc_with_profile(filename, abs_path, timeout, profile_dir: Path):
 
         return result
 
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        logger.exception("Formula recalculation failed")
+        return {"error": "Formula recalculation failed"}
 
 
 def main():

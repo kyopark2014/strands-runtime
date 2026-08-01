@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Korean weather CLI (KMA Weather Nuri + AirKorea).
 
@@ -20,6 +34,8 @@ import urllib.parse
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Optional: application/ for mcp_memory (home-address fallback)
 _APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -32,6 +48,14 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stderr)],
 )
 logger = logging.getLogger("korea-weather")
+
+# HTTP timeouts (seconds): page/JSON vs lightweight IP geo lookup.
+HTTP_TIMEOUT_SECONDS = 15
+IP_GEO_TIMEOUT_SECONDS = 8
+# Prefer place-search hits whose address contains a "동" token (weight vs token hits).
+DONG_NAME_MATCH_BONUS = 2
+# Sample hourly forecast at synoptic 3-hour intervals (00, 03, 06, …).
+HOURLY_FORECAST_SAMPLE_HOURS = 3
 
 BASE_URL = "https://www.weather.go.kr"
 PLACE_SEARCH_URL = f"{BASE_URL}/w/renew2021/rest/main/place-search.do"
@@ -121,28 +145,54 @@ JSON_HEADERS = {
 }
 
 
+def _http_session() -> requests.Session:
+    """Session with retries for transient network / 5xx failures."""
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=3,
+        backoff_factor=0.5,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+_SESSION = _http_session()
+
+
 def fetch_page(url: str, params: dict | None = None, headers: dict | None = None) -> str | None:
     """Fetch page HTML/text."""
     try:
-        resp = requests.get(
-            url, params=params or {}, headers=headers or REQUEST_HEADERS, timeout=15
+        resp = _SESSION.get(
+            url,
+            params=params or {},
+            headers=headers or REQUEST_HEADERS,
+            timeout=HTTP_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         resp.encoding = "utf-8"
         return resp.text
-    except Exception as e:
-        logger.error(f"Page request failed {url}: {e}")
+    except Exception as exc:
+        logger.error(f"Page request failed {url}: {exc}")
         return None
 
 
 def fetch_json(url: str, params: dict | None = None) -> list | dict | None:
     """Call a JSON API endpoint."""
     try:
-        resp = requests.get(url, params=params or {}, headers=JSON_HEADERS, timeout=15)
+        resp = _SESSION.get(
+            url, params=params or {}, headers=JSON_HEADERS, timeout=HTTP_TIMEOUT_SECONDS
+        )
         resp.raise_for_status()
         return resp.json()
-    except Exception as e:
-        logger.error(f"JSON request failed {url}: {e}")
+    except Exception as exc:
+        logger.error(f"JSON request failed {url}: {exc}")
         return None
 
 
@@ -162,20 +212,24 @@ def search_location(query: str) -> dict | None:
         blob = f"{addr} {title}"
         hit = sum(1 for t in tokens if t in blob)
         # Bonus when a dong name token appears in the address
-        dong_bonus = 2 if any(t.endswith("동") and t in addr for t in tokens) else 0
+        dong_bonus = (
+            DONG_NAME_MATCH_BONUS
+            if any(t.endswith("동") and t in addr for t in tokens)
+            else 0
+        )
         has_code = 1 if item.get("dongCode") else 0
         return (hit + dong_bonus, has_code)
 
     ranked = sorted(results, key=score, reverse=True)
-    r = ranked[0]
-    dong_code = r.get("dongCode") or ""
+    location_result = ranked[0]
+    dong_code = location_result.get("dongCode") or ""
     if not dong_code:
         return None
 
     # Normalize name/coords via dongInfo (place-search address may be POI-based)
     wide = city = dong_name = ""
-    lat = r.get("latitude")
-    lon = r.get("longitude")
+    lat = location_result.get("latitude")
+    lon = location_result.get("longitude")
     info = fetch_json(DONG_INFO_URL, {"dong": dong_code})
     if isinstance(info, dict):
         wide = (info.get("wide") or {}).get("name") or ""
@@ -197,18 +251,18 @@ def search_location(query: str) -> dict | None:
         display = f"{wide} {city} {dong_name}"
         address = display
     else:
-        address = r.get("address") or r.get("title") or query
+        address = location_result.get("address") or location_result.get("title") or query
         display = address
 
     return {
         "name": display,
         "address": address,
-        "title": r.get("title") or "",
+        "title": location_result.get("title") or "",
         "dongCode": dong_code,
         "lat": lat,
         "lon": lon,
-        "x": r.get("x"),
-        "y": r.get("y"),
+        "x": location_result.get("x"),
+        "y": location_result.get("y"),
     }
 
 
@@ -246,19 +300,19 @@ def resolve_location_from_ip() -> dict | None:
     Returns search_location()-compatible dict, or None on failure.
     """
     try:
-        resp = requests.get(
+        resp = _SESSION.get(
             IP_GEO_URL,
             params={
                 "lang": "ko",
                 "fields": "status,message,country,countryCode,regionName,city,lat,lon,query",
             },
             headers={"User-Agent": REQUEST_HEADERS["User-Agent"]},
-            timeout=8,
+            timeout=IP_GEO_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        logger.warning(f"IP geolocation request failed: {e}")
+    except Exception as exc:
+        logger.warning(f"IP geolocation request failed: {exc}")
         return None
 
     if not isinstance(data, dict) or data.get("status") != "success":
@@ -284,8 +338,8 @@ def resolve_location_from_ip() -> dict | None:
     region_ko = eng_city.get(region, region)
     city_ko = city
     # Songpa-gu → 송파구 style
-    m = re.match(r"([A-Za-z]+)-gu$", city, re.I)
-    if m:
+    gu_match = re.match(r"([A-Za-z]+)-gu$", city, re.I)
+    if gu_match:
         # Keep latin stem for place-search; also try with parent city
         city_ko = city
     if city in eng_city:
@@ -336,8 +390,8 @@ def resolve_location_from_memory() -> dict | None:
     """
     try:
         from recall_home_location import recall_home_location
-    except Exception as e:
-        logger.warning(f"recall_home_location import failed: {e}")
+    except Exception as exc:
+        logger.warning(f"recall_home_location import failed: {exc}")
         return None
 
     result = recall_home_location()
@@ -576,8 +630,8 @@ def parse_digital_forecast(html: str) -> dict:
         if feels is None:
             feels_raw = _li_field(item, "체감온도")
             if feels_raw:
-                m = re.search(r"([-\d.]+)", feels_raw)
-                feels = m.group(1) if m else feels_raw
+                number_match = re.search(r"([-\d.]+)", feels_raw)
+                feels = number_match.group(1) if number_match else feels_raw
 
         sky_el = item.select_one(".wic")
         sky = None
@@ -648,11 +702,11 @@ def parse_short_term_summary(html: str) -> dict:
     data: dict = {}
     if not html:
         return data
-    m = re.search(
+    issue_match = re.search(
         r"(\d{4}년 \d{1,2}월 \d{1,2}일 \([^\\)]+\)요일 \d{1,2}:\d{2}) 발표", html
     )
-    if m:
-        data["발표시각"] = m.group(1)
+    if issue_match:
+        data["발표시각"] = issue_match.group(1)
     summary_match = re.search(r"□\s*\(종합\)\s*([^○]+?)(?=○|$)", html, re.DOTALL)
     if summary_match:
         s = _strip_html(summary_match.group(1)).strip()
@@ -672,11 +726,11 @@ def _norm_temp(value: str | None) -> str:
 def _to_float(value: str | None) -> float | None:
     if value is None:
         return None
-    m = re.search(r"[-\d.]+", str(value))
-    if not m:
+    number_match = re.search(r"[-\d.]+", str(value))
+    if not number_match:
         return None
     try:
-        return float(m.group())
+        return float(number_match.group())
     except ValueError:
         return None
 
@@ -922,11 +976,11 @@ def format_weather_response(
         sampled = []
         for h in today_hours:
             t = h.get("time") or ""
-            m = re.match(r"(\d{2}):", t)
-            if m and int(m.group(1)) % 3 == 0:
+            hour_match = re.match(r"(\d{2}):", t)
+            if hour_match and int(hour_match.group(1)) % HOURLY_FORECAST_SAMPLE_HOURS == 0:
                 sampled.append(h)
         if not sampled:
-            sampled = today_hours[::3]
+            sampled = today_hours[::HOURLY_FORECAST_SAMPLE_HOURS]
         if sampled:
             lines.append("")
             lines.append("### 오늘 주요 시간대")
@@ -957,35 +1011,45 @@ def format_weather_response(
     return "\n".join(lines)
 
 
-def get_korea_weather_info(location: str) -> str:
-    """Look up Korean weather by location name (digital forecast + current + air quality)."""
-    raw = (location or "").strip()
-    resolve_note = None
+def _resolve_weather_location(
+    location: str,
+) -> tuple[dict | None, str, str | None]:
+    """Resolve a user location string into a dong location dict.
 
+    Returns (loc, location_for_search, resolve_note). When loc is None,
+    location_for_search holds the error / ASK_USER message for the caller.
+    """
+    raw = (location or "").strip()
     if _is_current_location_request(raw):
         loc, note = resolve_auto_location()
         if not loc:
-            return note  # ASK_USER_FOR_LOCATION
-        resolve_note = note
+            return None, note, None
         location_for_search = loc.get("resolved_query") or loc.get("name") or ""
-    else:
-        location_for_search = raw or "서울"
-        loc = search_location(location_for_search)
-        if not loc:
-            return (
+        return loc, location_for_search, note
+
+    location_for_search = raw or "서울"
+    loc = search_location(location_for_search)
+    if not loc:
+        return (
+            None,
+            (
                 f"'{location_for_search}'에 대한 지역을 찾을 수 없습니다. "
                 "예: 서울, 부산, 서울 서초구 반포3동, 강남구 등"
-            )
+            ),
+            None,
+        )
+    return loc, location_for_search, None
 
-    logger.info(
-        f"get_korea_weather_info: input={raw!r}, "
-        f"dongCode={loc['dongCode']}, name={loc['name']}, via={loc.get('resolved_via')}"
-    )
 
+def _fetch_weather_datasets(
+    loc: dict,
+    location_for_search: str,
+) -> tuple[dict, dict, object | None, object | None]:
+    """Fetch and parse current, forecast, regional, and air-quality data."""
     code = loc["dongCode"]
     lat = loc.get("lat")
     lon = loc.get("lon")
-    params_base = {"code": code, "unit": "m/s"}
+    params_base: dict = {"code": code, "unit": "m/s"}
     if lat is not None and lon is not None:
         params_base["lat"] = lat
         params_base["lon"] = lon
@@ -1020,6 +1084,23 @@ def get_korea_weather_info(location: str) -> str:
         air_html = fetch_page(AIRKOREA_FULL_URL)
         if air_html:
             air = parse_airkorea(air_html, air_region)
+
+    return current, forecast, air, regional
+
+
+def get_korea_weather_info(location: str) -> str:
+    """Look up Korean weather by location name (digital forecast + current + air quality)."""
+    raw = (location or "").strip()
+    loc, location_for_search, resolve_note = _resolve_weather_location(location)
+    if not loc:
+        return location_for_search  # error / ASK_USER message
+
+    logger.info(
+        f"get_korea_weather_info: input={raw!r}, "
+        f"dongCode={loc['dongCode']}, name={loc['name']}, via={loc.get('resolved_via')}"
+    )
+
+    current, forecast, air, regional = _fetch_weather_datasets(loc, location_for_search)
 
     if not current and not forecast.get("daily"):
         return "날씨 정보를 가져오지 못했습니다. 잠시 후 다시 시도해 주세요."
@@ -1065,6 +1146,22 @@ def get_korea_weather_by_stnid(stnid: int) -> str:
     return get_korea_weather_info(location)
 
 
+def _run_cli(location: str, stnid: int | None) -> int:
+    """Dispatch CLI args to the weather lookup helpers; print result to stdout."""
+    if stnid is not None:
+        if stnid not in STNID_TO_LOCATION:
+            print(
+                f"지원하지 않는 stnId입니다: {stnid}. "
+                "예: 109(서울·인천·경기), 159(부산·울산·경남), 184(제주)",
+                file=sys.stderr,
+            )
+            return 1
+        print(get_korea_weather_by_stnid(stnid))
+    else:
+        print(get_korea_weather_info(location or ""))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -1088,19 +1185,7 @@ def main() -> int:
         ),
     )
     args = parser.parse_args()
-
-    if args.stnid is not None:
-        if args.stnid not in STNID_TO_LOCATION:
-            print(
-                f"지원하지 않는 stnId입니다: {args.stnid}. "
-                "예: 109(서울·인천·경기), 159(부산·울산·경남), 184(제주)",
-                file=sys.stderr,
-            )
-            return 1
-        print(get_korea_weather_by_stnid(args.stnid))
-    else:
-        print(get_korea_weather_info(args.location or ""))
-    return 0
+    return _run_cli(args.location, args.stnid)
 
 
 if __name__ == "__main__":

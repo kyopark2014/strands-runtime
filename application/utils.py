@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import sys
 import json
@@ -5,6 +19,7 @@ import traceback
 import boto3
 import os
 from urllib import parse
+from botocore.config import Config
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -53,6 +68,10 @@ def _fill_missing_config_defaults(config: dict) -> dict:
     return config
 
 def load_config():
+    # Application-layer config loader: fills app defaults via
+    # _fill_missing_config_defaults (accountId, region, projectName).
+    # JSON file read pattern is shared with runtime_agent/strands/config_loader.py,
+    # but this loader stays distinct to avoid import-path/circular-import risk.
     config: dict = {}
     try:
         with open(config_path, "r", encoding="utf-8") as f:
@@ -151,7 +170,11 @@ def upload_to_s3(file_bytes: bytes, file_name: str) -> dict | None:
         return None
 
     try:
-        s3_client = boto3.client(service_name="s3", region_name=bedrock_region)
+        s3_client = boto3.client(
+            service_name="s3",
+            region_name=bedrock_region,
+            config=Config(retries={"max_attempts": 5, "mode": "standard"}),
+        )
         content_type = get_contents_type(file_name)
         logger.info("content_type: %s", content_type)
 
@@ -210,34 +233,33 @@ def get_active_ingestion_job() -> dict | None:
 
     try:
         bedrock_client = _bedrock_agent_client()
-        for status in ACTIVE_INGESTION_STATUSES:
-            response = bedrock_client.list_ingestion_jobs(
-                knowledgeBaseId=knowledge_base_id,
-                dataSourceId=data_source_id,
-                filters=[
-                    {
-                        "attribute": "STATUS",
-                        "operator": "EQ",
-                        "values": [status],
-                    }
-                ],
-                maxResults=1,
-                sortBy={
-                    "attribute": "STARTED_AT",
-                    "order": "DESCENDING",
-                },
-            )
-            summaries = response.get("ingestionJobSummaries") or []
-            if not summaries:
-                continue
-            job = summaries[0]
-            logger.info("Active ingestion job found: %s", job)
-            return {
-                "ingestion_job_id": job.get("ingestionJobId"),
-                "status": job.get("status"),
-                "started_at": str(job["startedAt"]) if job.get("startedAt") else None,
-            }
-        return None
+        # Single call with all active statuses (EQ values list = match any).
+        response = bedrock_client.list_ingestion_jobs(
+            knowledgeBaseId=knowledge_base_id,
+            dataSourceId=data_source_id,
+            filters=[
+                {
+                    "attribute": "STATUS",
+                    "operator": "EQ",
+                    "values": list(ACTIVE_INGESTION_STATUSES),
+                }
+            ],
+            maxResults=1,
+            sortBy={
+                "attribute": "STARTED_AT",
+                "order": "DESCENDING",
+            },
+        )
+        summaries = response.get("ingestionJobSummaries") or []
+        if not summaries:
+            return None
+        job = summaries[0]
+        logger.info("Active ingestion job found: %s", job)
+        return {
+            "ingestion_job_id": job.get("ingestionJobId"),
+            "status": job.get("status"),
+            "started_at": str(job["startedAt"]) if job.get("startedAt") else None,
+        }
     except Exception:
         logger.error("Error listing ingestion jobs: %s", traceback.format_exc())
         raise

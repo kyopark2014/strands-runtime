@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Register an additional Cognito user for Web UI login.
 
 Reads User Pool / App Client settings from application/config.json (written by
@@ -146,8 +160,8 @@ def test_login(
             },
         )
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         return False, f"InitiateAuth failed: {code} — {message}"
 
     challenge = response.get("ChallengeName")
@@ -162,8 +176,8 @@ def test_login(
     try:
         user = client.get_user(AccessToken=access_token)
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         return False, f"GetUser failed: {code} — {message}"
 
     verified = (user.get("Username") or "").strip()
@@ -178,7 +192,7 @@ def test_login(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Register a Cognito user for strands-runtime Web UI login.",
+        description="Register a Cognito user for cde-pilot Web UI login.",
     )
     parser.add_argument(
         "--username",
@@ -257,12 +271,12 @@ def main() -> int:
                 logger.error("  ✗ %s", login_detail)
 
     except ClientError as e:
-        code = e.response.get("Error", {}).get("Code", "")
-        message = e.response.get("Error", {}).get("Message", str(e))
+        code = e.response.get("Error", {}).get("Code", "") or type(e).__name__
+        message = e.response.get("Error", {}).get("Message") or "unknown"
         logger.error("Cognito error: %s — %s", code, message)
         return 1
     except Exception as e:
-        logger.error("Unexpected error: %s", e)
+        logger.error("Unexpected error: %s", type(e).__name__)
         return 1
 
     logger.info("")

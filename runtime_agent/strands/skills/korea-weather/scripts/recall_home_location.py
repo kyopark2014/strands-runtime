@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """
 Recall home / residence location from AgentCore memory.
 
@@ -27,6 +41,9 @@ logger = logging.getLogger("korea-weather-memory")
 
 DEFAULT_QUERY = "집 주소 자택 거주 지역 동네 홈 주소 home address residence"
 LOCATION_NOT_FOUND = "LOCATION_NOT_FOUND"
+# Plausible address / place-line length bounds for candidate filtering.
+MIN_ADDRESS_LENGTH = 2
+MAX_ADDRESS_LENGTH = 40
 
 
 def memory_contents_to_text(contents) -> str:
@@ -78,7 +95,7 @@ def extract_address_candidates(text: str) -> list[str]:
         re.I,
     ):
         val = re.sub(r"\s+", " ", m.group(1)).strip(" .")
-        if 2 <= len(val) <= 40:
+        if MIN_ADDRESS_LENGTH <= len(val) <= MAX_ADDRESS_LENGTH:
             candidates.append(val)
 
     seen: set[str] = set()
@@ -94,7 +111,9 @@ def _place_like_lines(text: str) -> list[str]:
     lines: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        if any(k in line for k in ("시", "구", "동", "군")) and 2 <= len(line) <= 40:
+        if any(k in line for k in ("시", "구", "동", "군")) and (
+            MIN_ADDRESS_LENGTH <= len(line) <= MAX_ADDRESS_LENGTH
+        ):
             lines.append(line)
     return lines
 
@@ -119,7 +138,7 @@ def recall_home_location(query: str = DEFAULT_QUERY, max_results: int = 10) -> d
             "status": "error",
             "location": None,
             "candidates": [],
-            "error": f"mcp_memory import failed: {e}",
+            "error": "Memory service unavailable",
         }
 
     try:
@@ -134,7 +153,7 @@ def recall_home_location(query: str = DEFAULT_QUERY, max_results: int = 10) -> d
             "status": "error",
             "location": None,
             "candidates": [],
-            "error": f"memory recall failed: {e}",
+            "error": "Unable to retrieve location from memory",
         }
 
     text = memory_contents_to_text(result)

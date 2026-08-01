@@ -102,8 +102,8 @@ def _undeclared_axes(kind: str, block: str, axes: dict[str, list[str]]) -> list[
     if kind not in AXID_LIMIT:
         return None
     ids = _AXID_RE.findall(block)
-    declared = {i for group in axes.values() for i in group}
-    if len([i for i in ids if i in declared]) >= 2:
+    declared = {axis_id for group in axes.values() for axis_id in group}
+    if len([axis_id for axis_id in ids if axis_id in declared]) >= 2:
         return None
     return ids
 
@@ -111,7 +111,7 @@ def _undeclared_axes(kind: str, block: str, axes: dict[str, list[str]]) -> list[
 def _check_chart_axis_references(part: str, xml: str) -> list[str]:
     axes = _declared_axes(xml)
     problems: list[str] = []
-    declared = {i for group in axes.values() for i in group}
+    declared = {axis_id for group in axes.values() for axis_id in group}
     for match in _ANY_CHART_GROUP_RE.finditer(xml):
         kind, block = match.group(1), match.group(0)
         ids = _undeclared_axes(kind, block, axes)
@@ -123,7 +123,7 @@ def _check_chart_axis_references(part: str, xml: str) -> list[str]:
                 f"group needs {AXID_MINIMUM[kind]}, and PowerPoint discards one with fewer"
             )
             continue
-        dead = [i for i in ids if i not in declared]
+        dead = [axis_id for axis_id in ids if axis_id not in declared]
         canonical = _canonical_ids(axes, AXID_LIMIT[kind])
         if canonical is not None and len(canonical) >= AXID_MINIMUM[kind]:
             hint = f"Fix: point them at the axes this part declares ({', '.join(canonical)})"

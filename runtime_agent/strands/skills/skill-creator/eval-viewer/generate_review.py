@@ -15,6 +15,7 @@ No dependencies beyond the Python stdlib are required.
 import argparse
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -26,6 +27,8 @@ import webbrowser
 from functools import partial
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # Files to exclude from output listings
 METADATA_FILES = {"transcript.md", "user_notes.md", "metrics.json"}
@@ -39,6 +42,10 @@ TEXT_EXTENSIONS = {
 
 # Extensions we render as inline images
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
+
+LSOF_TIMEOUT_SECONDS = 5
+PORT_KILL_WAIT_SECONDS = 0.5
+DEFAULT_SERVER_PORT = 3117
 
 # MIME type overrides for common types
 MIME_OVERRIDES = {
@@ -94,8 +101,8 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
                 metadata = json.loads(candidate.read_text())
                 prompt = metadata.get("prompt", "")
                 eval_id = metadata.get("eval_id")
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Skipping unreadable metadata %s: %s", candidate, type(e).__name__)
             if prompt:
                 break
 
@@ -108,8 +115,8 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
                     match = re.search(r"## Eval Prompt\n\n([\s\S]*?)(?=\n##|$)", text)
                     if match:
                         prompt = match.group(1).strip()
-                except OSError:
-                    pass
+                except OSError as e:
+                    logger.warning("Skipping unreadable transcript %s: %s", candidate, type(e).__name__)
                 if prompt:
                     break
 
@@ -132,8 +139,8 @@ def build_run(root: Path, run_dir: Path) -> dict | None:
         if candidate.exists():
             try:
                 grading = json.loads(candidate.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
+            except (json.JSONDecodeError, OSError) as e:
+                logger.warning("Skipping unreadable grading %s: %s", candidate, type(e).__name__)
             if grading:
                 break
 
@@ -228,8 +235,8 @@ def load_previous_iteration(workspace: Path) -> dict[str, dict]:
                 for r in data.get("reviews", [])
                 if r.get("feedback", "").strip()
             }
-        except (json.JSONDecodeError, OSError, KeyError):
-            pass
+        except (json.JSONDecodeError, OSError, KeyError) as e:
+            logger.warning("Skipping unreadable feedback.json: %s", type(e).__name__)
 
     # Load runs (to get outputs)
     prev_runs = find_runs(workspace)
@@ -288,9 +295,9 @@ def generate_html(
 def _kill_port(port: int) -> None:
     """Kill any process listening on the given port."""
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # nosec B603 — fixed `lsof` binary + argv list, shell=False
             ["lsof", "-ti", f":{port}"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=LSOF_TIMEOUT_SECONDS,
         )
         for pid_str in result.stdout.strip().split("\n"):
             if pid_str.strip():
@@ -299,7 +306,7 @@ def _kill_port(port: int) -> None:
                 except (ProcessLookupError, ValueError):
                     pass
         if result.stdout.strip():
-            time.sleep(0.5)
+            time.sleep(PORT_KILL_WAIT_SECONDS)
     except subprocess.TimeoutExpired:
         pass
     except FileNotFoundError:
@@ -337,8 +344,12 @@ class ReviewHandler(BaseHTTPRequestHandler):
             if self.benchmark_path and self.benchmark_path.exists():
                 try:
                     benchmark = json.loads(self.benchmark_path.read_text())
-                except (json.JSONDecodeError, OSError):
-                    pass
+                except (json.JSONDecodeError, OSError) as e:
+                    logger.warning(
+                        "Failed to load benchmark from %s: %s",
+                        self.benchmark_path,
+                        type(e).__name__,
+                    )
             html = generate_html(runs, self.skill_name, self.previous, benchmark)
             content = html.encode("utf-8")
             self.send_response(200)
@@ -370,7 +381,8 @@ class ReviewHandler(BaseHTTPRequestHandler):
                 resp = b'{"ok":true}'
                 self.send_response(200)
             except (json.JSONDecodeError, OSError, ValueError) as e:
-                resp = json.dumps({"error": str(e)}).encode()
+                logger.warning("Failed to save feedback: %s", type(e).__name__)
+                resp = b'{"error":"Failed to save feedback"}'
                 self.send_response(500)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(resp)))
@@ -387,7 +399,13 @@ class ReviewHandler(BaseHTTPRequestHandler):
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate and serve eval review")
     parser.add_argument("workspace", type=Path, help="Path to workspace directory")
-    parser.add_argument("--port", "-p", type=int, default=3117, help="Server port (default: 3117)")
+    parser.add_argument(
+        "--port",
+        "-p",
+        type=int,
+        default=DEFAULT_SERVER_PORT,
+        help=f"Server port (default: {DEFAULT_SERVER_PORT})",
+    )
     parser.add_argument("--skill-name", "-n", type=str, default=None, help="Skill name for header")
     parser.add_argument(
         "--previous-workspace", type=Path, default=None,
@@ -425,8 +443,8 @@ def main() -> None:
     if benchmark_path and benchmark_path.exists():
         try:
             benchmark = json.loads(benchmark_path.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to load benchmark from %s: %s", benchmark_path, type(e).__name__)
 
     if args.static:
         html = generate_html(runs, skill_name, previous, benchmark)

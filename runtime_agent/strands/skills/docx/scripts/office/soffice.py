@@ -16,12 +16,15 @@ callers that build their own argv (they must pass -env:UserInstallation too).
 """
 
 import contextlib
+import logging
 import os
 import socket
 import subprocess
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 def get_soffice_env() -> dict:
@@ -36,6 +39,7 @@ def get_soffice_env() -> dict:
 
 
 def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run fixed binary `soffice` with an argv list (shell=False)."""
     args = list(args)
     with contextlib.ExitStack() as stack:
         if not any(str(a).startswith("-env:UserInstallation") for a in args):
@@ -43,7 +47,18 @@ def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:
                 tempfile.TemporaryDirectory(prefix="lo_profile_", ignore_cleanup_errors=True)
             )
             args = [f"-env:UserInstallation={Path(profile).as_uri()}"] + args
-        return subprocess.run(["soffice"] + args, env=get_soffice_env(), **kwargs)
+        try:
+            # Justification: fixed `soffice` binary + argv list, shell=False;
+            # temp profile dir when caller omits -env:UserInstallation.
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            return subprocess.run(  # nosec B603 — fixed `soffice` binary + argv list, shell=False
+                ["soffice", *args],
+                env=get_soffice_env(),
+                **kwargs,
+            )
+        except (OSError, subprocess.SubprocessError):
+            logger.exception("Failed to run soffice")
+            raise
 
 
 
@@ -52,8 +67,8 @@ _SHIM_SO = Path(tempfile.gettempdir()) / "lo_socket_shim.so"
 
 def _needs_shim() -> bool:
     try:
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.close()
+        test_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        test_socket.close()
         return False
     except OSError:
         return True
@@ -65,12 +80,23 @@ def _ensure_shim() -> Path:
 
     src = Path(tempfile.gettempdir()) / "lo_socket_shim.c"
     src.write_text(_SHIM_SOURCE)
-    subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
-        check=True,
-        capture_output=True,
-    )
-    src.unlink()
+    # Justification: fixed `gcc` binary + static argv list under tempfile dir, shell=False;
+    # compiles LD_PRELOAD shim only.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+    try:
+        subprocess.run(  # nosec B603 — fixed `gcc` binary + static argv list under tempfile dir, shell=False
+            ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "Cannot build the AF_UNIX socket shim: 'gcc' is not available"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Failed to compile the AF_UNIX socket shim") from error
+    finally:
+        src.unlink(missing_ok=True)
     return _SHIM_SO
 
 
@@ -92,11 +118,14 @@ static int (*real_accept)(int, struct sockaddr *, socklen_t *);
 static int (*real_close)(int);
 static int (*real_read)(int, void *, size_t);
 
-/* Per-FD bookkeeping (FDs >= 1024 are passed through unshimmed). */
-static int is_shimmed[1024];
-static int peer_of[1024];
-static int wake_r[1024];            /* accept() blocks reading this */
-static int wake_w[1024];            /* close()  writes to this      */
+/* Max FDs tracked by the shim (FDs >= FD_TABLE_SIZE are passed through unshimmed). */
+#define FD_TABLE_SIZE 1024
+
+/* Per-FD bookkeeping. */
+static int is_shimmed[FD_TABLE_SIZE];
+static int peer_of[FD_TABLE_SIZE];
+static int wake_r[FD_TABLE_SIZE];   /* accept() blocks reading this */
+static int wake_w[FD_TABLE_SIZE];   /* close()  writes to this      */
 static int listener_fd = -1;        /* FD that received listen()    */
 
 __attribute__((constructor))
@@ -107,7 +136,7 @@ static void init(void) {
     real_accept     = dlsym(RTLD_NEXT, "accept");
     real_close      = dlsym(RTLD_NEXT, "close");
     real_read       = dlsym(RTLD_NEXT, "read");
-    for (int i = 0; i < 1024; i++) {
+    for (int i = 0; i < FD_TABLE_SIZE; i++) {
         peer_of[i] = -1;
         wake_r[i]  = -1;
         wake_w[i]  = -1;
@@ -122,7 +151,7 @@ int socket(int domain, int type, int protocol) {
         /* socket(AF_UNIX) blocked – fall back to socketpair(). */
         int sv[2];
         if (real_socketpair(domain, type, protocol, sv) == 0) {
-            if (sv[0] >= 0 && sv[0] < 1024) {
+            if (sv[0] >= 0 && sv[0] < FD_TABLE_SIZE) {
                 is_shimmed[sv[0]] = 1;
                 peer_of[sv[0]]    = sv[1];
                 int wp[2];
@@ -141,7 +170,7 @@ int socket(int domain, int type, int protocol) {
 
 /* ---- listen ---------------------------------------------------------- */
 int listen(int sockfd, int backlog) {
-    if (sockfd >= 0 && sockfd < 1024 && is_shimmed[sockfd]) {
+    if (sockfd >= 0 && sockfd < FD_TABLE_SIZE && is_shimmed[sockfd]) {
         listener_fd = sockfd;
         return 0;
     }
@@ -150,7 +179,7 @@ int listen(int sockfd, int backlog) {
 
 /* ---- accept ---------------------------------------------------------- */
 int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
-    if (sockfd >= 0 && sockfd < 1024 && is_shimmed[sockfd]) {
+    if (sockfd >= 0 && sockfd < FD_TABLE_SIZE && is_shimmed[sockfd]) {
         /* Block until close() writes to the wake pipe. */
         if (wake_r[sockfd] >= 0) {
             char buf;
@@ -164,7 +193,7 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 
 /* ---- close ----------------------------------------------------------- */
 int close(int fd) {
-    if (fd >= 0 && fd < 1024 && is_shimmed[fd]) {
+    if (fd >= 0 && fd < FD_TABLE_SIZE && is_shimmed[fd]) {
         int was_listener = (fd == listener_fd);
         is_shimmed[fd] = 0;
 

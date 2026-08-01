@@ -30,6 +30,7 @@ WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 def _fail(message: str):
     print(f"Error: {message}", file=sys.stderr)
+    # Exit 2: usage / input error (distinct from validation failure = 1).
     sys.exit(2)
 
 
@@ -145,6 +146,7 @@ def main():
                 f"No XSD schema validation is performed for xlsx-family files ({exts}). "
                 "For formula-error checking, use scripts/recalc.py instead."
             )
+            # Exit 0: xlsx has no XSD path; treat as success (not a failure).
             sys.exit(0)
         case _:
             print(f"Error: Validation not supported for file type {family}")

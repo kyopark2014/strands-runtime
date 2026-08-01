@@ -1,5 +1,20 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import sys
+import json
 import utils
 import os
 import boto3
@@ -28,31 +43,84 @@ contents_dir = os.path.join(parent_dir, "contents")
 logger.info(f"workingDir: {workingDir}")
 logger.info(f"contents_dir: {contents_dir}")
 
+
+def _stdio_env(**extra: str) -> dict[str, str]:
+    """Merge parent process env so stdio MCP children keep KNOWLEDGE_BASE_ID / AWS creds."""
+    env = {k: v for k, v in os.environ.items() if isinstance(v, str)}
+    env.update({k: v for k, v in extra.items() if v is not None})
+    # Prefer config.json values when env vars were not injected on the Runtime.
+    if not env.get("KNOWLEDGE_BASE_ID") and config.get("knowledge_base_id"):
+        env["KNOWLEDGE_BASE_ID"] = str(config["knowledge_base_id"])
+    if not env.get("PROJECT_NAME") and config.get("projectName"):
+        env["PROJECT_NAME"] = str(config["projectName"])
+    if not env.get("AWS_REGION") and config.get("region"):
+        env["AWS_REGION"] = str(config["region"])
+        env.setdefault("AWS_DEFAULT_REGION", str(config["region"]))
+    # Ensure MCP children see runtime config even if parent env was incomplete
+    # at process start (config.json is dockerignored; APP_CONFIG_JSON is source).
+    if not env.get("APP_CONFIG_JSON"):
+        try:
+            fresh = utils.load_config()
+            env["APP_CONFIG_JSON"] = json.dumps(
+                {k: v for k, v in fresh.items() if v not in (None, "")},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        except Exception as e:
+            logger.warning("Could not inject APP_CONFIG_JSON for MCP child: %s", e)
+    return env
+
 def get_agentcore_gateway_mcp_url(gateway_name: str, gateway_region: str) -> str | None:
-    # Prefer URL already written by the root installer (avoids ListGateways on every request).
+    # Prefer URL already written by installer/CDK/Terraform (avoids ListGateways).
     configured_url = (
         config.get("agentcore_websearch_gateway_url")
         or os.environ.get("agentcore_websearch_gateway_url")
+        or os.environ.get("AGENTCORE_WEBSEARCH_GATEWAY_URL")
         or ""
     ).strip()
-    if gateway_name == "gateway-websearch" and configured_url:
+    if configured_url:
         logger.info(f"Using configured AgentCore gateway URL for {gateway_name}")
         return configured_url.rstrip("/")
 
+    # Resolve by name: project gateway is usually `{projectName}`, not "gateway-websearch".
+    names_to_try = []
+    for candidate in (
+        gateway_name,
+        config.get("agentcore_websearch_gateway_name"),
+        config.get("projectName"),
+        projectName,
+        "gateway-websearch",
+    ):
+        if candidate and candidate not in names_to_try:
+            names_to_try.append(str(candidate))
+
     client = boto3.client("bedrock-agentcore-control", region_name=gateway_region)
     try:
-        response = client.list_gateways()
-        for item in response.get("items", []):
-            if item.get("name") != gateway_name:
+        items = []
+        next_token = None
+        while True:
+            kwargs = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            response = client.list_gateways(**kwargs)
+            items.extend(response.get("items") or response.get("gateways") or [])
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+
+        for item in items:
+            item_name = item.get("name") or item.get("gatewayName")
+            if item_name not in names_to_try:
                 continue
 
-            gateway_id = item["gatewayId"]
+            gateway_id = item.get("gatewayId") or item.get("gatewayIdentifier")
             gateway = client.get_gateway(gatewayIdentifier=gateway_id)
             return gateway["gatewayUrl"].rstrip("/")
     except Exception as e:
         logger.error(f"Error resolving AgentCore gateway URL for {gateway_name}: {e}")
 
     return None
+
 
 def load_config(mcp_type):
     if mcp_type == "knowledge base":
@@ -98,9 +166,7 @@ def load_config(mcp_type):
                 "kb-retriever": {
                     "command": "python",
                     "args": [f"{workingDir}/mcp_server_retrieve.py"],
-                    "env": {
-                        "PYTHONPATH": workingDir,
-                    },
+                    "env": _stdio_env(PYTHONPATH=workingDir),
                 }
             }
         }    
@@ -140,11 +206,22 @@ def load_config(mcp_type):
         }
 
     elif mcp_type == "websearch":
-        gateway_url = get_agentcore_gateway_mcp_url("gateway-websearch", "us-east-1")
+        gateway_region = (
+            config.get("agentcore_websearch_gateway_region")
+            or os.environ.get("AGENTCORE_WEBSEARCH_GATEWAY_REGION")
+            or "us-east-1"
+        )
+        gateway_name = (
+            config.get("agentcore_websearch_gateway_name")
+            or config.get("projectName")
+            or projectName
+            or "gateway-websearch"
+        )
+        gateway_url = get_agentcore_gateway_mcp_url(gateway_name, gateway_region)
         if not gateway_url:
             logger.info(
                 "AgentCore gateway websearch MCP skipped: "
-                "gateway-websearch not found in us-east-1."
+                f"{gateway_name} not found in {gateway_region}."
             )
             return {}
         return {
@@ -153,7 +230,7 @@ def load_config(mcp_type):
                     "type": "streamable_http",
                     "url": gateway_url,
                     "auth_type": "aws_sigv4",
-                    "auth_region": "us-east-1",
+                    "auth_region": gateway_region,
                     "auth_service": "bedrock-agentcore",
                 }
             }

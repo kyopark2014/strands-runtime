@@ -1,27 +1,53 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """AgentCore Observability setup: Transaction Search and trace delivery."""
 
 from __future__ import annotations
 
 import json
+import logging
 import time
 from typing import Any
 
 import boto3
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
+
+logger = logging.getLogger(__name__)
 
 SPANS_LOG_GROUP = "aws/spans"
 RESOURCE_POLICY_NAME = "TransactionSearchXRayAccess"
+# X-Ray transaction-search destination activation can take up to 15 minutes.
 DESTINATION_WAIT_SECONDS = 900
+# Poll interval while waiting for the destination to become ACTIVE.
 DESTINATION_POLL_INTERVAL = 15
 
 
 def _need_resource_policy(logs_client) -> bool:
     try:
-        response = logs_client.describe_resource_policies()
-        for policy in response.get("resourcePolicies", []):
-            if policy.get("policyName") == RESOURCE_POLICY_NAME:
-                return False
-        return True
+        next_token = None
+        while True:
+            kwargs = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            response = logs_client.describe_resource_policies(**kwargs)
+            for policy in response.get("resourcePolicies", []):
+                if policy.get("policyName") == RESOURCE_POLICY_NAME:
+                    return False
+            next_token = response.get("nextToken")
+            if not next_token:
+                return True
     except Exception:
         return True
 
@@ -36,32 +62,69 @@ def _need_trace_destination(xray_client) -> bool:
 
 def _need_indexing_rule(xray_client) -> bool:
     try:
-        response = xray_client.get_indexing_rules()
-        for rule in response.get("IndexingRules", []):
-            if rule.get("Name") == "Default":
-                return False
-        return True
+        next_token = None
+        while True:
+            kwargs = {}
+            if next_token:
+                kwargs["NextToken"] = next_token
+            response = xray_client.get_indexing_rules(**kwargs)
+            for rule in response.get("IndexingRules", []):
+                if rule.get("Name") == "Default":
+                    return False
+            next_token = response.get("NextToken")
+            if not next_token:
+                return True
     except Exception:
         return True
 
 
 def spans_log_group_exists(region: str) -> bool:
     logs_client = boto3.client("logs", region_name=region)
-    response = logs_client.describe_log_groups(logGroupNamePrefix=SPANS_LOG_GROUP, limit=1)
-    return any(group.get("logGroupName") == SPANS_LOG_GROUP for group in response.get("logGroups", []))
+    try:
+        response = logs_client.describe_log_groups(
+            logGroupNamePrefix=SPANS_LOG_GROUP, limit=1
+        )
+        return any(
+            group.get("logGroupName") == SPANS_LOG_GROUP
+            for group in response.get("logGroups", [])
+        )
+    except (ClientError, BotoCoreError) as error:
+        logger.warning(
+            "Failed to check for %s log group in %s: %s",
+            SPANS_LOG_GROUP,
+            region,
+            error,
+        )
+        return False
+
+
+def _get_trace_destination_status(xray_client, destination: str) -> tuple[str, bool]:
+    """Return (status, matches) for the current trace segment destination.
+
+    Wraps the AWS call so a transient X-Ray/API error does not abort the
+    polling loop; a failed poll is treated as "not yet ACTIVE" and retried
+    until the overall deadline elapses.
+    """
+    try:
+        response = xray_client.get_trace_segment_destination()
+    except (ClientError, BotoCoreError) as error:
+        logger.warning("get_trace_segment_destination failed: %s", error)
+        return "UNKNOWN", False
+    status = response.get("Status", "UNKNOWN")
+    current = response.get("Destination")
+    return status, (current == destination and status == "ACTIVE")
 
 
 def _wait_for_trace_destination(xray_client, destination: str) -> str:
     deadline = time.time() + DESTINATION_WAIT_SECONDS
+    status = "UNKNOWN"
     while time.time() < deadline:
-        response = xray_client.get_trace_segment_destination()
-        status = response.get("Status", "UNKNOWN")
-        current = response.get("Destination")
-        if current == destination and status == "ACTIVE":
+        status, ready = _get_trace_destination_status(xray_client, destination)
+        if ready:
             return status
         time.sleep(DESTINATION_POLL_INTERVAL)
-    response = xray_client.get_trace_segment_destination()
-    return response.get("Status", "TIMEOUT")
+    status, _ = _get_trace_destination_status(xray_client, destination)
+    return status if status != "UNKNOWN" else "TIMEOUT"
 
 
 def _create_cloudwatch_logs_resource_policy(logs_client, account_id: str, region: str) -> None:
@@ -113,13 +176,21 @@ def _configure_indexing_rule(xray_client) -> None:
 def _toggle_transaction_search_for_spans_log_group(region: str) -> str:
     xray_client = boto3.client("xray", region_name=region)
     print("  Toggling Transaction Search to create aws/spans log group...")
-    xray_client.update_trace_segment_destination(Destination="XRay")
-    xray_status = _wait_for_trace_destination(xray_client, "XRay")
-    print(f"  X-Ray destination status: {xray_status}")
-    xray_client.update_trace_segment_destination(Destination="CloudWatchLogs")
-    cw_status = _wait_for_trace_destination(xray_client, "CloudWatchLogs")
-    print(f"  CloudWatchLogs destination status: {cw_status}")
-    return cw_status
+    try:
+        xray_client.update_trace_segment_destination(Destination="XRay")
+        xray_status = _wait_for_trace_destination(xray_client, "XRay")
+        print(f"  X-Ray destination status: {xray_status}")
+        xray_client.update_trace_segment_destination(Destination="CloudWatchLogs")
+        cw_status = _wait_for_trace_destination(xray_client, "CloudWatchLogs")
+        print(f"  CloudWatchLogs destination status: {cw_status}")
+        return cw_status
+    except (ClientError, BotoCoreError) as error:
+        logger.warning(
+            "Failed to toggle Transaction Search for spans log group in %s: %s",
+            region,
+            error,
+        )
+        return "ERROR"
 
 
 def ensure_transaction_search(region: str, account_id: str) -> dict[str, Any]:

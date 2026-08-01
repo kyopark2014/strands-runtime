@@ -32,7 +32,9 @@ def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
     # programmatic subprocess usage is safe. Same pattern as run_eval.py.
     env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-    result = subprocess.run(
+    # Fixed `claude` binary argv list, shell=False; prompt on stdin (not argv); no shell expansion.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+    result = subprocess.run(  # nosec B603 — fixed `claude` binary + argv list, shell=False; prompt on stdin
         cmd,
         input=prompt,
         capture_output=True,
@@ -41,9 +43,7 @@ def _call_claude(prompt: str, model: str | None, timeout: int = 300) -> str:
         timeout=timeout,
     )
     if result.returncode != 0:
-        raise RuntimeError(
-            f"claude -p exited {result.returncode}\nstderr: {result.stderr}"
-        )
+        raise RuntimeError(f"claude -p exited {result.returncode}")
     return result.stdout
 
 

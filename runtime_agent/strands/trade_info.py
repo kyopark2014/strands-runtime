@@ -1,22 +1,31 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from __future__ import annotations
 
 import logging
 import sys
 import os
-import io
 import boto3
 import uuid
 import json
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
-import matplotlib.font_manager as fm
-
 from urllib import parse
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Optional, List, Tuple
-from matplotlib.patches import Rectangle
-from typing import cast
+from typing import Callable, Dict, Optional, List, Tuple, TypeVar, cast
+from botocore.config import Config
+from retry_utils import retry_call
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -27,16 +36,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger("loader")
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
-config_path = os.path.join(script_dir, "config.json")
-    
-def load_config():
-    config = None
-        
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    
-    return config
+# S3 / FDR resilience defaults
+S3_RETRY_CONFIG = Config(
+    retries={"max_attempts": 5, "mode": "standard"},
+)
+FDR_MAX_ATTEMPTS = 3
+FDR_RETRY_BASE_DELAY_SECONDS = 1.0
+
+T = TypeVar("T")
+
+
+def _retry_call(
+    operation: str,
+    fn: Callable[[], T],
+    *,
+    max_attempts: int = FDR_MAX_ATTEMPTS,
+    base_delay: float = FDR_RETRY_BASE_DELAY_SECONDS,
+) -> T:
+    """Retry an idempotent read with exponential backoff."""
+    return retry_call(
+        operation,
+        fn,
+        max_attempts=max_attempts,
+        base_delay=base_delay,
+        log=logger,
+    )
+
+from utils import load_config
 
 config = load_config()
 
@@ -46,8 +72,16 @@ projectName = config.get("projectName", "es")
 s3_prefix = "docs"
 s3_image_prefix = "images"
 model_name = "Claude 4.0 Sonnet"
-s3_bucket = config.get("s3_bucket")
-path = config.get('sharing_url', '')
+
+
+def _s3_bucket() -> str:
+    return (load_config().get("s3_bucket") or "").strip()
+
+
+def _sharing_url() -> str:
+    """Resolve at call time — import-time snapshots miss APP_CONFIG_JSON updates."""
+    return (load_config().get("sharing_url") or "").strip().rstrip("/")
+
 
 # Simple mapping: subject (company name) -> KRX ticker (yfinance format)
 # Add more companies here if needed.
@@ -91,6 +125,15 @@ SUBJECT_TO_TICKER: Dict[str, str] = {
 
 stocks = {}
 
+# yfinance KRX ticker: 6-digit code + '.' + market suffix (KS=KOSPI, KQ=KOSDAQ), e.g. 035420.KS
+TICKER_CODE_LEN = 6
+TICKER_MIN_LEN = 9  # 6 digits + '.' + 2-char suffix
+TICKER_DOT_INDEX = 6
+TICKER_MARKET_SUFFIXES = frozenset({"KS", "KQ"})
+# Extra calendar days beyond the requested period to cover weekends/holidays.
+NON_TRADING_DAY_BUFFER = 5
+
+
 def get_contents_type(file_name):
     if file_name.lower().endswith((".jpg", ".jpeg")):
         content_type = "image/jpeg"
@@ -123,9 +166,20 @@ def upload_to_s3(file_bytes, file_name):
     Upload a file to S3 and return the URL
     """
     try:
+        bucket = _s3_bucket()
+        sharing = _sharing_url()
+        if not bucket or not sharing:
+            logger.error(
+                "S3 upload skipped: s3_bucket=%r sharing_url=%r",
+                bucket,
+                sharing,
+            )
+            return None
+
         s3_client = boto3.client(
             service_name='s3',
-            region_name=region,
+            region_name=load_config().get("region", region),
+            config=S3_RETRY_CONFIG,
         )
 
         content_type = get_contents_type(file_name)       
@@ -142,7 +196,7 @@ def upload_to_s3(file_bytes, file_name):
         }
         
         response = s3_client.put_object(
-            Bucket=s3_bucket, 
+            Bucket=bucket, 
             Key=s3_key, 
             ContentType=content_type,
             Metadata = user_meta,
@@ -150,13 +204,13 @@ def upload_to_s3(file_bytes, file_name):
         )
         logger.info(f"upload response: {response}")
 
-        #url = f"https://{s3_bucket}.s3.amazonaws.com/{s3_key}"
-        url = path+'/'+s3_image_prefix+'/'+parse.quote(file_name)
+        url = f"{sharing}/{s3_image_prefix}/{parse.quote(file_name)}"
         return url
     
-    except Exception as e:
-        err_msg = f"Error uploading to S3: {str(e)}"
-        logger.info(f"{err_msg}")
+    except Exception as exc:
+        logger.error(
+            "Error uploading to S3: %s", type(exc).__name__, exc_info=True
+        )
         return None
 
 def resolve_ticker(subject: str) -> str:
@@ -182,15 +236,26 @@ def resolve_ticker(subject: str) -> str:
             return ticker
 
     # 2) If it's already a yfinance-style ticker, accept as-is
-    s = (subject or "").strip().upper()
-    if len(s) >= 9 and s[:6].isdigit() and s[6] == '.' and s[7:] in {"KS", "KQ"}:
-        return s
+    ticker_text = (subject or "").strip().upper()
+    if (
+        len(ticker_text) >= TICKER_MIN_LEN
+        and ticker_text[:TICKER_CODE_LEN].isdigit()
+        and ticker_text[TICKER_DOT_INDEX] == "."
+        and ticker_text[TICKER_DOT_INDEX + 1 :] in TICKER_MARKET_SUFFIXES
+    ):
+        return ticker_text
 
     # 3) Fallback: try searching candidates
     try:
         candidates = search_ticker_candidates(subject, limit=1)
     except Exception as exc:
-        raise ValueError(f"Failed to resolve ticker for input {subject!r}: {exc}") from exc
+        logger.error(
+            "Failed to resolve ticker for input %r (%s)",
+            subject,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise ValueError("Failed to resolve ticker for the provided input") from exc
 
     if candidates:
         return candidates[0].get("ticker", "") or (
@@ -225,9 +290,17 @@ def search_ticker_candidates(query: str, limit: int = 5) -> List[Dict[str, str]]
         ) from exc
 
     try:
-        df = fdr.StockListing("KRX")
+        df = _retry_call(
+            "FDR StockListing(KRX)",
+            lambda: fdr.StockListing("KRX"),
+        )
     except Exception as exc:
-        raise RuntimeError(f"FDR StockListing(KRX) call failed: err={exc}") from exc
+        logger.error(
+            "FDR StockListing(KRX) failed (%s)",
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise RuntimeError("Failed to retrieve stock listing data") from exc
 
     if df is None or getattr(df, "empty", True):
         return []
@@ -237,16 +310,16 @@ def search_ticker_candidates(query: str, limit: int = 5) -> List[Dict[str, str]]
     symbol_col = "Symbol"
     market_col = "Market"
 
-    q = (query or "").strip()
-    if not q:
+    query_text = (query or "").strip()
+    if not query_text:
         return []
 
     try:
-        name_mask = df[name_col].astype(str).str.contains(q, case=False, na=False)
+        name_mask = df[name_col].astype(str).str.contains(query_text, case=False, na=False)
     except Exception:
         name_mask = False
     try:
-        symbol_mask = df[symbol_col].astype(str).str.contains(q, na=False)
+        symbol_mask = df[symbol_col].astype(str).str.contains(query_text, na=False)
     except Exception:
         symbol_mask = False
 
@@ -256,8 +329,8 @@ def search_ticker_candidates(query: str, limit: int = 5) -> List[Dict[str, str]]
         return []
 
     def market_to_suffix(market: str) -> str:
-        m = (market or "").upper()
-        if "KOSDAQ" in m:
+        market_name = (market or "").upper()
+        if "KOSDAQ" in market_name:
             return ".KQ"
         # Default: treat as KOSPI
         return ".KS"
@@ -293,14 +366,23 @@ def _fetch_fdr(itemcode: str, period: int = 30) -> List[Dict[str, object]]:
 
     end_dt = datetime.now(timezone.utc).date()
     # Query period days (add buffer to account for non-trading days)
-    start_dt = end_dt - timedelta(days=period + 5)
+    start_dt = end_dt - timedelta(days=period + NON_TRADING_DAY_BUFFER)
 
     try:
-        df = fdr.DataReader(itemcode, start_dt.isoformat(), end_dt.isoformat())
+        df = _retry_call(
+            f"FDR DataReader({itemcode})",
+            lambda: fdr.DataReader(
+                itemcode, start_dt.isoformat(), end_dt.isoformat()
+            ),
+        )
     except Exception as exc:
-        raise RuntimeError(
-            f"FDR DataReader call failed: code={itemcode}, err={exc}"
-        ) from exc
+        logger.error(
+            "FDR DataReader failed for code=%s (%s)",
+            itemcode,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        raise RuntimeError("Failed to retrieve stock data for the specified ticker") from exc
 
     if df is None or df.empty:
         logger.info(
@@ -323,16 +405,16 @@ def _fetch_fdr(itemcode: str, period: int = 30) -> List[Dict[str, object]]:
         time_iso = ts.astimezone(timezone.utc).isoformat()
 
         def _get_float(name: str):
-            v = row.get(name)
+            raw_value = row.get(name)
             try:
-                return float(v) if v is not None else None
+                return float(raw_value) if raw_value is not None else None
             except Exception:
                 return None
 
         def _get_int(name: str):
-            v = row.get(name)
+            raw_value = row.get(name)
             try:
-                return int(v) if v is not None else None
+                return int(raw_value) if raw_value is not None else None
             except Exception:
                 return None
 
@@ -485,362 +567,16 @@ def is_lower_than_ma20(company_name: str = "NAVER", period: int = 30) -> bool:
     current_close = close_prices[-1]
 
     return True if current_close < df['ma20'].values[-1] else False
-    
+
+
 def draw_stock_trend(trend: Dict[str, object]) -> Dict[str, List[str]]:
-    """
-    Draw graphs of the given trend.
-    trend: the trend dictionary of the given company (containing points, company_name, ticker, etc.)
-    return: dictionary with 'path' key containing a list of image file paths for the graphs
-    """
-    logger.info(f"draw_stock_trend --> trend: {trend}")
+    """Draw graphs of the given trend (delegates rendering to trade_charts)."""
+    from trade_charts import draw_stock_trend as _draw_stock_trend
 
-    image_url = []
-
-    ###########################################################################################
-    # Graph showing stock trend (candlestick chart)
-    ###########################################################################################
-    try:
-        # Try common Korean fonts on macOS
-        korean_fonts = ['AppleGothic', 'NanumGothic', 'Malgun Gothic', 'Apple SD Gothic Neo']
-        font_found = False
-        for font_name in korean_fonts:
-            try:
-                plt.rcParams['font.family'] = font_name
-                plt.rcParams['axes.unicode_minus'] = False  # Fix minus sign display
-                font_found = True
-                logger.info(f"Korean font set to: {font_name}")
-                break
-            except Exception:
-                continue
-        if not font_found:
-            # Fallback: set to any available font
-            plt.rcParams['axes.unicode_minus'] = False
-            logger.warning("Could not set Korean font, using default font")
-    except Exception as exc:
-        logger.warning(f"Font setting failed: {exc}, continuing with default font")
-        plt.rcParams['axes.unicode_minus'] = False
-
-    points = trend.get("points", [])
-    if not points:
-        raise ValueError("trend does not contain points data.")
-
-    company_name = trend.get("company_name", "Stock")
-    ticker = trend.get("ticker", "")
-
-    # Prepare data
-    df = pd.DataFrame(points)
-    df['time'] = pd.to_datetime(df['time'])
-    df = df.sort_values('time').reset_index(drop=True)  # Sort by time
-    
-    # Calculate moving averages for trend analysis
-    df['ma5'] = df['close'].rolling(window=5, min_periods=1).mean()  # 5-day moving average
-    df['ma20'] = df['close'].rolling(window=20, min_periods=1).mean()  # 20-day moving average
-
-    # Draw candlestick graph
-    fig, ax = plt.subplots(figsize=(14, 7))
-
-    width = 0.6
-
-    for idx, row in df.iterrows():
-        date = mdates.date2num(row['time'])
-        open_price = row['open']
-        close_price = row['close']
-        high_price = row['high']
-        low_price = row['low']
-        
-        # Check for None values
-        if any(v is None for v in [open_price, close_price, high_price, low_price]):
-            continue
-        
-        # Determine color (red for up, blue for down)
-        color = 'red' if close_price >= open_price else 'blue'
-        
-        # High-low line (wick)
-        ax.plot([date, date], [low_price, high_price], color=color, linewidth=1)
-        
-        # Open-close box (body)
-        body_height = abs(close_price - open_price)
-        body_bottom = min(open_price, close_price)
-        rect = Rectangle((date - width/2, body_bottom), width, body_height, 
-                         facecolor=color, edgecolor=color, linewidth=1)
-        ax.add_patch(rect)
-    
-    # Draw moving average lines
-    if len(df) > 0:
-        dates = [mdates.date2num(t) for t in df['time']]
-        ax.plot(dates, df['ma5'], color='orange', linewidth=2, label='MA5', linestyle='-', alpha=0.8)
-        ax.plot(dates, df['ma20'], color='green', linewidth=2, label='MA20', linestyle='-', alpha=0.8)
-
-    # Configure graph
-    if len(df) > 0:
-        ax.set_xlim(mdates.date2num(df['time'].min()) - 1, mdates.date2num(df['time'].max()) + 1)
-        ax.set_ylim(df['low'].min() - 200, df['high'].max() + 200)
-
-    # Format X-axis
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-    ax.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-    plt.xticks(rotation=45, ha='right')
-
-    # Labels and title
-    title = f'{company_name} Stock Trend - Candlestick Chart'
-    if ticker:
-        title += f' ({ticker})'
-    ax.set_xlabel('Date', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Price (KRW)', fontsize=12, fontweight='bold')
-    ax.set_title(title, fontsize=14, fontweight='bold')
-
-    # Add grid
-    ax.grid(True, alpha=0.3)
-
-    # Add legend
-    from matplotlib.patches import Patch
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Patch(facecolor='red', edgecolor='red', label='Up'),
-        Patch(facecolor='blue', edgecolor='blue', label='Down'),
-        Line2D([0], [0], color='orange', linewidth=2, label='MA5 (5-day)'),
-        Line2D([0], [0], color='green', linewidth=2, label='MA20 (20-day)')
-    ]
-    ax.legend(handles=legend_elements, loc='upper left')
-
-    plt.tight_layout()
-
-    # Save to file
-    image_name = generate_short_uuid() + '.png'
-
-    if path:
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig)
-        buf.seek(0)
-
-        url = upload_to_s3(buf.getvalue(), image_name)
-        if url:
-            image_url.append(url)
-            logger.info(f"image_url: {image_url}")
-
-    else:
-        os.makedirs('contents', exist_ok=True)
-        file_path = os.path.join('contents', image_name)
-        
-        plt.savefig(file_path, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig)
-            
-        image_url.append(os.path.abspath(file_path))
-        logger.info(f"image_url: {image_url}")
-
-    ###########################################################################################
-    # Graph showing daily price increase and decrease percentages
-    ###########################################################################################
-    df = pd.DataFrame(points)
-    df['time'] = pd.to_datetime(df['time'])
-    df = df.sort_values('time').reset_index(drop=True)  # Sort by time
-    
-    # Create a new figure for the bar chart
-    fig2, ax2 = plt.subplots(figsize=(14, 7))
-    
-    # Prepare data for bar chart
-    if len(df) > 0 and 'change_percent' in df.columns:
-        dates = df['time']
-        change_percent = df['change_percent'].fillna(0).values
-        
-        # Convert dates to matplotlib date numbers (same as candlestick chart)
-        date_nums = [mdates.date2num(d) for d in dates]
-        width_days = 0.6  # Width in days (same as candlestick chart width=0.6)
-        
-        # Determine colors: red for positive (increase), blue for negative (decrease)
-        colors = ['red' if x >= 0 else 'blue' for x in change_percent]
-        
-        # Draw bar chart using date numbers
-        bars = ax2.bar(date_nums, change_percent, color=colors, alpha=0.7, width=width_days)
-        
-        # Add percentage labels on bars
-        for i, (bar, val) in enumerate(zip(bars, change_percent)):
-            if not pd.isna(val) and val != 0:
-                label_text = f'{val:.2f}%'
-                # Position text above bar for positive values, below for negative values
-                if val >= 0:
-                    ax2.text(bar.get_x() + bar.get_width()/2, val,
-                            label_text, ha='center', va='bottom', fontsize=12, fontweight='bold')
-                else:
-                    ax2.text(bar.get_x() + bar.get_width()/2, val,
-                            label_text, ha='center', va='top', fontsize=12, fontweight='bold')
-        
-        # Set X-axis limits to match candlestick chart
-        ax2.set_xlim(mdates.date2num(df['time'].min()) - 1, mdates.date2num(df['time'].max()) + 1)
-        
-        # Format X-axis with dates (same format as candlestick chart)
-        ax2.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-        ax2.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
-        
-        # Add zero line
-        ax2.axhline(y=0, color='black', linestyle='-', linewidth=0.5)
-        
-        # Labels and title
-        title2 = f'{company_name} Daily Price Change Percentage'
-        if ticker:
-            title2 += f' ({ticker})'
-        ax2.set_xlabel('Date', fontsize=12, fontweight='bold')
-        ax2.set_ylabel('Change Percentage (%)', fontsize=12, fontweight='bold')
-        ax2.set_title(title2, fontsize=14, fontweight='bold')
-        
-        # Add grid
-        ax2.grid(True, alpha=0.3, axis='y')
-        
-        # Add legend
-        from matplotlib.patches import Patch
-        legend_elements = [
-            Patch(facecolor='red', edgecolor='red', label='Increase'),
-            Patch(facecolor='blue', edgecolor='blue', label='Decrease')
-        ]
-        ax2.legend(handles=legend_elements, loc='upper right')
-    
-    plt.tight_layout()
-
-    # Save to file
-    image_name = generate_short_uuid() + '.png'
-
-    if path:
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig2)
-        buf.seek(0)
-
-        url = upload_to_s3(buf.getvalue(), image_name)
-        if url:
-            image_url.append(url)
-            logger.info(f"image_url: {image_url}")
-
-    else:
-        os.makedirs('contents', exist_ok=True)
-        file_path = os.path.join('contents', image_name)
-        plt.savefig(file_path, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig2)
-        image_url.append(os.path.abspath(file_path))
-
-    # Draw stock trend graph based on closing price
-    df = pd.DataFrame(points)
-    df['time'] = pd.to_datetime(df['time'])
-    df = df.sort_values('time').reset_index(drop=True)  # Sort by time
-    
-    # Draw line graph based on closing price with daily change
-    fig3, ax3 = plt.subplots(figsize=(14, 7))
-
-    # Filter out None values for close price
-    df_clean = df[df['close'].notna()].copy()
-    
-    if len(df_clean) > 0:
-        # Convert dates to matplotlib date numbers
-        dates = [mdates.date2num(t) for t in df_clean['time']]
-        close_prices = df_clean['close'].values
-        
-        # Fill NaN values: use close price for high/low if missing
-        high_prices = df_clean['high'].fillna(df_clean['close']).values
-        low_prices = df_clean['low'].fillna(df_clean['close']).values
-        
-        # Draw filled area between high and low prices
-        ax3.fill_between(dates, low_prices, high_prices, 
-                         color='lightgray', alpha=0.3, label='High-Low Range', zorder=1)
-        
-        # Draw line graph for closing price
-        ax3.plot(dates, close_prices, color='blue', linewidth=2, label='Closing Price', marker='o', markersize=4, zorder=3)
-        
-        # Find and highlight maximum and minimum closing prices (highest and lowest)
-        max_idx = pd.Series(close_prices).idxmax()
-        min_idx = pd.Series(close_prices).idxmin()
-        
-        max_close = close_prices[max_idx]
-        min_close = close_prices[min_idx]
-        max_date = dates[max_idx]
-        min_date = dates[min_idx]
-        
-        # Get current (last) closing price for percentage calculation
-        current_close = close_prices[-1]
-        
-        # Calculate percentage from current closing price
-        max_percent = ((max_close - current_close) / current_close) * 100 if current_close != 0 else 0
-        min_percent = ((min_close - current_close) / current_close) * 100 if current_close != 0 else 0
-        logger.info(f"max_percent: {max_percent}")
-        logger.info(f"min_percent: {min_percent}")
-        
-        # Highlight maximum closing price (highest price)
-        ax3.plot(max_date, max_close, marker='^', markersize=12, color='darkred', 
-               markeredgecolor='white', markeredgewidth=2, zorder=5, label='Max Price')
-        ax3.annotate(f'Max: {max_percent:+.2f}%',
-                   xy=(max_date, max_close),
-                   xytext=(10, 10), textcoords='offset points',
-                   fontsize=15, fontweight='bold', color='darkred',
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='yellow', alpha=0.7),
-                   arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='darkred'))
-        
-        # Highlight minimum closing price (lowest price)
-        ax3.plot(min_date, min_close, marker='v', markersize=12, color='darkblue',
-               markeredgecolor='white', markeredgewidth=2, zorder=5, label='Min Price')
-        ax3.annotate(f'Min: {min_percent:+.2f}%',
-                   xy=(min_date, min_close),
-                   xytext=(10, -20), textcoords='offset points',
-                   fontsize=15, fontweight='bold', color='darkblue',
-                   bbox=dict(boxstyle='round,pad=0.3', facecolor='lightblue', alpha=0.7),
-                   arrowprops=dict(arrowstyle='->', connectionstyle='arc3,rad=0', color='darkblue'))
-        
-        # Configure Y-axis to show closing price, high, and low
-        all_values = list(close_prices) + list(high_prices) + list(low_prices)
-        if len(all_values) > 0:
-            min_val_plot = min(all_values)
-            max_val_plot = max(all_values)
-            ax3.set_ylim(min_val_plot * 0.98, max_val_plot * 1.02)
-        
-        ax3.set_xlim(min(dates) - 1, max(dates) + 1)
-        ax3.set_ylabel('Price (KRW)', fontsize=12, fontweight='bold', color='blue')
-        ax3.tick_params(axis='y', labelcolor='blue')
-
-    # Format X-axis
-    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-    ax3.xaxis.set_major_locator(mdates.WeekdayLocator(interval=1))
-    plt.xticks(rotation=45, ha='right')
-
-    # Labels and title
-    title3 = f'{company_name} Stock Trend - Closing Price & Daily Change'
-    if ticker:
-        title3 += f' ({ticker})'
-    ax3.set_xlabel('Date', fontsize=12, fontweight='bold')
-    ax3.set_title(title3, fontsize=14, fontweight='bold')
-
-    # Add grid
-    ax3.grid(True, alpha=0.3)
-    
-    # Add legend
-    ax3.legend(loc='upper left')
-    
-    plt.tight_layout()
-
-    # Save to file
-    image_name = generate_short_uuid() + '.png'    
-
-    if path:
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig3)
-        buf.seek(0)
-
-        url = upload_to_s3(buf.getvalue(), image_name)
-        if url:
-            image_url.append(url)
-            logger.info(f"image_url: {image_url}")
-        else:
-            logger.error(f"Failed to upload image to S3: {image_name}")
-
-    else:
-        os.makedirs('contents', exist_ok=True)
-        file_path = os.path.join('contents', image_name)
-        
-        plt.savefig(file_path, format='png', dpi=100, bbox_inches='tight')
-        plt.close(fig3)
-
-        image_url.append(os.path.abspath(file_path))
-        logger.info(f"image_url: {image_url}")
-
-    return {
-        "path": image_url
-    }
+    return _draw_stock_trend(
+        trend,
+        upload_to_s3=upload_to_s3,
+        generate_short_uuid=generate_short_uuid,
+        sharing_url=_sharing_url(),
+        s3_bucket=_s3_bucket(),
+    )

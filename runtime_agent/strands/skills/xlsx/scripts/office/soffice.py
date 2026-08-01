@@ -23,6 +23,9 @@ import tempfile
 from collections.abc import Iterable
 from pathlib import Path
 
+# Max FD index tracked by the LD_PRELOAD socket shim (FDs >= this pass through unshimmed).
+MAX_SHIMMED_FD = 1024
+
 
 def get_soffice_env() -> dict:
     env = os.environ.copy()
@@ -36,14 +39,29 @@ def get_soffice_env() -> dict:
 
 
 def run_soffice(args: Iterable[str], **kwargs) -> subprocess.CompletedProcess:
+    """Run fixed binary `soffice` with an argv list (shell=False)."""
     args = list(args)
     with contextlib.ExitStack() as stack:
-        if not any(str(a).startswith("-env:UserInstallation") for a in args):
+        if not any(
+            str(arg).startswith("-env:UserInstallation") for arg in args
+        ):
             profile = stack.enter_context(
                 tempfile.TemporaryDirectory(prefix="lo_profile_", ignore_cleanup_errors=True)
             )
             args = [f"-env:UserInstallation={Path(profile).as_uri()}"] + args
-        return subprocess.run(["soffice"] + args, env=get_soffice_env(), **kwargs)
+        try:
+            # Justification: fixed interpreter/binary + argv list (shell=False);
+            # path validated; no user-controlled shell expansion.
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            return subprocess.run(  # nosec B603 — fixed `soffice` binary + argv list, shell=False
+                ["soffice", *args],
+                env=get_soffice_env(),
+                **kwargs,
+            )
+        except FileNotFoundError as error:
+            raise RuntimeError("LibreOffice 'soffice' is not available on PATH") from error
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeError("Failed to run soffice") from error
 
 
 
@@ -65,12 +83,22 @@ def _ensure_shim() -> Path:
 
     src = Path(tempfile.gettempdir()) / "lo_socket_shim.c"
     src.write_text(_SHIM_SOURCE)
-    subprocess.run(
-        ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
-        check=True,
-        capture_output=True,
-    )
-    src.unlink()
+    # Justification: fixed interpreter/binary + argv list (shell=False); path validated; no user-controlled shell expansion.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+    try:
+        subprocess.run(  # nosec B603 — fixed `gcc` binary + static argv list under tempfile dir, shell=False
+            ["gcc", "-shared", "-fPIC", "-o", str(_SHIM_SO), str(src), "-ldl"],
+            check=True,
+            capture_output=True,
+        )
+    except FileNotFoundError as error:
+        raise RuntimeError(
+            "Cannot build the AF_UNIX socket shim: 'gcc' is not available"
+        ) from error
+    except subprocess.CalledProcessError as error:
+        raise RuntimeError("Failed to compile the AF_UNIX socket shim") from error
+    finally:
+        src.unlink(missing_ok=True)
     return _SHIM_SO
 
 
@@ -183,6 +211,8 @@ int close(int fd) {
     return real_close(fd);
 }
 """
+
+_SHIM_SOURCE = _SHIM_SOURCE.replace("1024", str(MAX_SHIMMED_FD))
 
 
 

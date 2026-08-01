@@ -1,13 +1,41 @@
-import os
-import json
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
+import os
+import re
 import sys
-import uuid
 import time
+import uuid
+from collections.abc import Callable
+from typing import TypeVar
 
 from bedrock_agentcore.memory import MemoryClient
-from datetime import datetime, timezone
-import re
+from botocore.exceptions import BotoCoreError, ClientError
+
+from memory_service import MemoryService
+from memory_config import (
+    MEMORY_EXTRACTION_MODEL_ID,
+    SEMANTIC_CONSOLIDATION_PROMPT,
+    SEMANTIC_PROMPT,
+    SUMMARY_PROMPT,
+    USER_PREFERENCE_PROMPT,
+    _existing_strategy_names,
+    shared_memory_strategies,
+)
+from retry_utils import retry_call
+from utils import load_config
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -18,24 +46,54 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agentcore_memory")
 
-def load_config():
-    config = None
-    
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "config.json")
-    
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-    
-    return config
-
 config = load_config()
+
+T = TypeVar("T")
+MEMORY_MAX_ATTEMPTS = 3
+MEMORY_RETRY_BASE_DELAY_SECONDS = 1.0
+# add_strategy triggers an asynchronous UpdateMemory; the Memory stays in
+# UPDATING briefly and rejects a follow-up strategy write until it settles.
+# There is no describe-and-wait primitive, so pause before the next call.
+STRATEGY_SETTLE_DELAY_SECONDS = 5
+
+
+def _retry_call(
+    operation: str,
+    fn: Callable[[], T],
+    *,
+    max_attempts: int = MEMORY_MAX_ATTEMPTS,
+    base_delay: float = MEMORY_RETRY_BASE_DELAY_SECONDS,
+) -> T:
+    """Retry an idempotent Memory client call with exponential backoff."""
+    return retry_call(
+        operation,
+        fn,
+        max_attempts=max_attempts,
+        base_delay=base_delay,
+        log=logger,
+    )
 
 bedrock_region = config.get('region')
 projectName = config.get('projectName')
-agentcore_memory_role = config.get('agentcore_memory_role')
+agentcore_memory_role = config.get('agentcore_memory_role') or os.environ.get(
+    "AGENTCORE_MEMORY_ROLE", ""
+)
+# Prefer env from CDK Runtime / ECS when config.json is stale in the image.
+if os.environ.get("MEMORY_ID"):
+    config["memory_id"] = os.environ["MEMORY_ID"]
+if os.environ.get("AGENTCORE_MEMORY_ROLE"):
+    config["agentcore_memory_role"] = os.environ["AGENTCORE_MEMORY_ROLE"]
+    agentcore_memory_role = os.environ["AGENTCORE_MEMORY_ROLE"]
 
 memory_client = MemoryClient(region_name=bedrock_region)
+_memory_service = MemoryService(memory_client.create_event)
+
+# Cap list_memories pagination pages (fail-fast if exceeded; do not return partial lists).
+MAX_LIST_MEMORY_PAGES = 100
+# AgentCore Memory actor_id max length (API constraint).
+MAX_ACTOR_ID_LENGTH = 128
+# Page size for list_memories API calls.
+LIST_MEMORIES_PAGE_SIZE = 100
 
 # AgentCore Memory namespace pattern:
 # [a-zA-Z0-9/*][a-zA-Z0-9-_/*]*(?::[a-zA-Z0-9-_/*]+)*[a-zA-Z0-9-_/*]*
@@ -52,7 +110,7 @@ def sanitize_memory_actor_id(user_id: str) -> str:
         cleaned = "default"
     if not re.match(r"^[a-zA-Z0-9]", cleaned):
         cleaned = f"u_{cleaned}"
-    return cleaned[:128]
+    return cleaned[:MAX_ACTOR_ID_LENGTH]
 
 
 def resolve_memory_actor_id(user_id: str) -> str:
@@ -91,80 +149,53 @@ def load_memory_variables(user_id: str):
     )
     return memory_id, actor_id, session_id, namespace
 
-# CUSTOM_PROMPT = (
-#     "You are tasked with analyzing conversations to extract the user's general preferences."
-#      "You'll be analyzing two sets of data:"
-#      "<past_conversation>"
-#      "[Past conversations between the user and system will be placed here for context]"
-#      "</past_conversation>"
-#      "<current_conversation>"
-#      "[The current conversation between the user and system will be placed here]"
-#      "</current_conversation>"
-#      "Your job is to identify and categorize the user's general preferences across various topics and domains."
-#      "- Extract user preferences for different types of content, services, or products they show interest in."
-#      "- Identify communication style preferences, such as formal vs casual, detailed vs concise."
-#      "- Recognize technology preferences, such as specific platforms, tools, or applications they prefer."
-#      "- Note any recurring themes or topics the user is particularly interested in or knowledgeable about."
-#      "- Capture any specific requirements or constraints they mention in their interactions."
-#      "use Korean."
-# )
+def _normalize_memory_summary(memory: dict) -> dict:
+    normalized = memory.copy()
+    if "id" in memory and "memoryId" not in normalized:
+        normalized["memoryId"] = memory["id"]
+    elif "memoryId" in memory and "id" not in normalized:
+        normalized["id"] = memory["memoryId"]
+    return normalized
 
-USER_PREFERENCE_PROMPT = (
-    "You are tasked with analyzing conversations to extract the user's preferences. You'll be analyzing two sets of data:\n"
-    "<past_conversation>\n"
-    "[Past conversations between the user and system will be placed here for context]\n"
-    "</past_conversation>\n"
-    "<current_conversation>\n"
-    "[The current conversation between the user and system will be placed here]\n"
-    "</current_conversation>\n"
-    "Your job is to identify and categorize the user's preferences into two main types:\n"
-    "- Explicit preferences: Directly stated preferences by the user.\n"
-    "- Implicit preferences: Inferred from patterns, repeated inquiries, or contextual clues. Take a close look at user's request for implicit preferences.\n"
-    "For explicit preference, extract only preference that the user has explicitly shared. Do not infer user's preference.\n"
-    "For implicit preference, it is allowed to infer user's preference, but only the ones with strong signals, such as requesting something multiple times.\n"
-    "Use Korean.\n"
-)
 
-SUMMARY_PROMPT = (
-    "You will be given a text block and a list of summaries you previously generated when available.\n"
-    "<task>\n"
-    "- When the previously generated is not available, your goal is to summarize the given text block.\n"
-    "- When there is existing summary, your goal is to extend summary by taking into account the given text block.\n"
-    "- If there are queries/topics specified in the text block, your generated summary need to cover those queries/topics.\n"
-    "- If there are instructions in the text block **guiding you how to generate summary**, you MUST follow them.\n"
-    "</task>\n"
-    "Use Korean.\n"
-)
+def _list_all_memories() -> list:
+    """
+    List all AgentCore memories, following nextToken until exhausted.
 
-SEMANTIC_PROMPT = (
-    "You are a long-term memory extraction agent supporting a lifelong learning system.\n"
-    "Your task is to identify and extract meaningful information about the users from a given list of messages.\n"
-    "Analyze the conversation and extract structured information about the user according to the schema below.\n"
-    "Only include details that are explicitly stated or can be logically inferred from the conversation.\n"
-    "- Extract information ONLY from the user messages. You should use assistant messages only as supporting context.\n"
-    "- If the conversation contains no relevant or noteworthy information, return an empty list.\n"
-    "- Do NOT extract anything from prior conversation history, even if provided. Use it solely for context.\n"
-    "- Do NOT incorporate external knowledge.\n"
-    "- Avoid duplicate extractions.\n"
-    "Use Korean.\n"
-)
+    MemoryClient.list_memories(max_results=N) paginates but stops at N.
+    This helper consumes pages until nextToken is gone (with a page safety cap).
+    """
+    memories: list = []
+    next_token = None
+    for page in range(MAX_LIST_MEMORY_PAGES):
+        kwargs: dict = {"maxResults": LIST_MEMORIES_PAGE_SIZE}
+        if next_token:
+            kwargs["nextToken"] = next_token
+        response = memory_client.gmcp_client.list_memories(**kwargs)
+        page_items = response.get("memories") or []
+        memories.extend(_normalize_memory_summary(m) for m in page_items)
+        next_token = response.get("nextToken")
+        if not next_token:
+            return memories
+    raise RuntimeError(
+        f"list_memories exceeded {MAX_LIST_MEMORY_PAGES} pages; "
+        "refusing incomplete results for retrieve_memory_id"
+    )
 
-# Backward-compatible alias (typo in earlier revisions)
-SEMENTIC_PROMPT = SEMANTIC_PROMPT
-
-SEMANTIC_CONSOLIDATION_PROMPT = (
-    "You consolidate newly extracted facts with existing long-term semantic memories.\n"
-    "- Merge duplicates; keep the most specific and recent facts.\n"
-    "- Do not invent facts that were not extracted.\n"
-    "- Prefer clear, atomic statements in Korean.\n"
-    "Use Korean.\n"
-)
 
 def retrieve_memory_id():
     memory_id = None
     memory_name = projectName.replace("-", "_")  # use projectName as memory name
 
-    memories = memory_client.list_memories()
+    try:
+        memories = _list_all_memories()
+    except (ClientError, BotoCoreError, RuntimeError) as e:
+        logger.error(
+            "Failed to list memories while resolving memory_id for %s: %s",
+            memory_name,
+            type(e).__name__,
+        )
+        return None
     logger.info(f"memories: {memories}")
     for memory in memories:            
         logger.info(f"Memory ID: {memory.get('id')}")
@@ -177,108 +208,27 @@ def retrieve_memory_id():
     return memory_id
 
 def load_memory_strategy(memory_id: str):
-    strategies = memory_client.get_memory_strategies(memory_id)
-    logger.info(f"strategies: {strategies}")
-    return strategies
-
-# Must be an inference profile available in the configured region (us-west-2).
-# Foundation IDs like anthropic.claude-3-5-haiku-... fail UpdateMemory with:
-# "Bedrock model is not available in region us-west-2"
-MEMORY_EXTRACTION_MODEL_ID = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-
-# Shared strategies per memory_id (not per actor). Isolation via {actorId}/{sessionId}.
-# AgentCore allows at most 6 strategies per memory — treat that as strategy *kinds*.
-USER_PREFERENCE_STRATEGY_NAME = "UserPreference"
-# Prefer a leaf path so /users/{actorId} does not prefix-match /facts or /sessions.
-USER_PREFERENCE_NAMESPACE_TEMPLATE = "/users/{actorId}/preferences"
-SUMMARY_STRATEGY_NAME = "Summary"
-# AgentCore requires {sessionId} in Summary strategy namespaces.
-SUMMARY_NAMESPACE_TEMPLATE = "/users/{actorId}/sessions/{sessionId}"
-SEMANTIC_STRATEGY_NAME = "Semantic"
-SEMANTIC_NAMESPACE_TEMPLATE = "/users/{actorId}/facts"
-
-
-def _strategy_namespaces(strategy: dict) -> list:
-    return list(strategy.get("namespaces") or strategy.get("namespaceTemplates") or [])
-
-
-def _existing_strategy_names(strategies: list) -> set:
-    return {(s.get("name") or "") for s in (strategies or []) if s.get("name")}
-
-
-def _build_user_preference_strategy() -> dict:
-    return {
-        "customMemoryStrategy": {
-            "name": USER_PREFERENCE_STRATEGY_NAME,
-            "namespaces": [USER_PREFERENCE_NAMESPACE_TEMPLATE],
-            "configuration": {
-                "userPreferenceOverride": {
-                    "extraction": {
-                        "modelId": MEMORY_EXTRACTION_MODEL_ID,
-                        "appendToPrompt": USER_PREFERENCE_PROMPT,
-                    }
-                }
-            },
-        }
-    }
-
-
-def _build_summary_strategy() -> dict:
-    # Summary override supports consolidation only (no extraction step).
-    return {
-        "customMemoryStrategy": {
-            "name": SUMMARY_STRATEGY_NAME,
-            "namespaces": [SUMMARY_NAMESPACE_TEMPLATE],
-            "configuration": {
-                "summaryOverride": {
-                    "consolidation": {
-                        "modelId": MEMORY_EXTRACTION_MODEL_ID,
-                        "appendToPrompt": SUMMARY_PROMPT,
-                    }
-                }
-            },
-        }
-    }
-
-
-def _build_semantic_strategy() -> dict:
-    return {
-        "customMemoryStrategy": {
-            "name": SEMANTIC_STRATEGY_NAME,
-            "namespaces": [SEMANTIC_NAMESPACE_TEMPLATE],
-            "configuration": {
-                "semanticOverride": {
-                    "extraction": {
-                        "modelId": MEMORY_EXTRACTION_MODEL_ID,
-                        "appendToPrompt": SEMANTIC_PROMPT,
-                    },
-                    "consolidation": {
-                        "modelId": MEMORY_EXTRACTION_MODEL_ID,
-                        "appendToPrompt": SEMANTIC_CONSOLIDATION_PROMPT,
-                    },
-                }
-            },
-        }
-    }
-
-
-def shared_memory_strategies() -> list:
-    """Strategy definitions shared by create_memory / installer / ensure."""
-    return [
-        _build_user_preference_strategy(),
-        _build_summary_strategy(),
-        _build_semantic_strategy(),
-    ]
-
+    try:
+        strategies = memory_client.get_memory_strategies(memory_id)
+        logger.info(f"strategies: {strategies}")
+        return strategies
+    except Exception as e:
+        logger.error(
+            f"Failed to get memory strategies for memory_id={memory_id!r}: {e}"
+        )
+        raise
 
 def add_strategy(memory_id: str, strategy: dict):
     name = (strategy.get("customMemoryStrategy") or {}).get("name")
     namespaces = (strategy.get("customMemoryStrategy") or {}).get("namespaces")
-    memory_client.add_strategy(memory_id, strategy)
+    _retry_call(
+        "add_strategy",
+        lambda: memory_client.add_strategy(memory_id, strategy),
+    )
     logger.info(
         f"Added shared strategy {name!r} namespaces={namespaces!r} to memory_id={memory_id}"
     )
-    time.sleep(5)
+    time.sleep(STRATEGY_SETTLE_DELAY_SECONDS)
 
 
 def create_strategy_if_not_exists(memory_id: str):
@@ -311,68 +261,35 @@ def create_strategy_if_not_exists(memory_id: str):
 
 def create_memory():
     """Create project Memory with shared UserPreference + Summary + Semantic strategies."""
-    result = memory_client.create_memory_and_wait(
-        name=projectName.replace("-", "_"),
-        description=f"Memory for {projectName}",
-        event_expiry_days=365,  # 7 - 365 days
-        strategies=shared_memory_strategies(),
-        memory_execution_role_arn=agentcore_memory_role,
-    )
+    try:
+        result = _retry_call(
+            "create_memory_and_wait",
+            lambda: memory_client.create_memory_and_wait(
+                name=projectName.replace("-", "_"),
+                description=f"Memory for {projectName}",
+                event_expiry_days=365,  # 7 - 365 days
+                strategies=shared_memory_strategies(),
+                memory_execution_role_arn=agentcore_memory_role,
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to create AgentCore memory")
+        raise
     logger.info(f"result of memory creation: {result}")
     memory_id = result.get("id")
     logger.info(f"created memory_id: {memory_id}")
     return memory_id
     
 def save_conversation_to_memory(memory_id, actor_id, session_id, query, result):
-    logger.info(f"###### save_conversation_to_memory ######")
-
-    # Validate query and result are not empty
-    if not query or not isinstance(query, str) or len(query.strip()) == 0:
-        logger.warning(f"Query is empty or invalid, skipping memory save")
-        return
-    
-    if not result or not isinstance(result, str) or len(result.strip()) == 0:
-        logger.warning(f"Result is empty or invalid, skipping memory save")
-        return
-
-    # Truncate text to AWS Bedrock limit (9000 characters)
-    max_length = 9000
-    truncate_suffix = "... [truncated]"
-    suffix_length = len(truncate_suffix)
-    max_content_length = max_length - suffix_length  # Reserve space for suffix
-    
-    query_trimmed = query.strip()
-    result_trimmed = result.strip()
-    
-    if len(query_trimmed) > max_length:
-        logger.warning(f"Query text exceeds {max_length} characters, truncating")
-        query_trimmed = query_trimmed[:max_content_length] + truncate_suffix
-        # Ensure final length doesn't exceed max_length
-        if len(query_trimmed) > max_length:
-            query_trimmed = query_trimmed[:max_length]
-    
-    if len(result_trimmed) > max_length:
-        logger.warning(f"Result text exceeds {max_length} characters, truncating")
-        result_trimmed = result_trimmed[:max_content_length] + truncate_suffix
-        # Ensure final length doesn't exceed max_length
-        if len(result_trimmed) > max_length:
-            result_trimmed = result_trimmed[:max_length]
-
-    event_timestamp = datetime.now(timezone.utc)
-    conversation = [
-        (query_trimmed, "USER"),
-        (result_trimmed, "ASSISTANT")
-    ]
-
+    logger.info("###### save_conversation_to_memory ######")
     try:
-        memory_result = memory_client.create_event(
+        return _memory_service.save_conversation(
             memory_id=memory_id,
-            actor_id=actor_id, 
-            session_id=session_id, 
-            event_timestamp=event_timestamp,
-            messages=conversation
+            actor_id=actor_id,
+            session_id=session_id,
+            query=query,
+            result=result,
         )
-        logger.info(f"result of save conversation to memory: {memory_result}")
     except Exception as e:
         logger.error(f"Error saving conversation to memory: {e}")
         raise
@@ -383,13 +300,39 @@ def get_memory_record(user_id: str):
     memory_id, actor_id, session_id, namespace = load_memory_variables(user_id)
     logger.info(f"memory_id: {memory_id}, user_id: {user_id}, actor_id: {actor_id}, session_id: {session_id}, namespace: {namespace}")
     
-    conversations = memory_client.list_events(
-        memory_id=memory_id,
-        actor_id=actor_id,
-        session_id=session_id,
-        max_results=5,
-    )
+    try:
+        conversations = _retry_call(
+            "list_events",
+            lambda: memory_client.list_events(
+                memory_id=memory_id,
+                actor_id=actor_id,
+                session_id=session_id,
+                max_results=5,
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to list memory events for user_id=%s", user_id)
+        raise
     logger.info(f"conversations: {conversations}")
 
     return conversations
 
+# Re-export strategy constants for backward compatibility.
+__all__ = [
+    "MEMORY_EXTRACTION_MODEL_ID",
+    "USER_PREFERENCE_PROMPT",
+    "SUMMARY_PROMPT",
+    "SEMANTIC_PROMPT",
+    "SEMANTIC_CONSOLIDATION_PROMPT",
+    "shared_memory_strategies",
+    "sanitize_memory_actor_id",
+    "resolve_memory_actor_id",
+    "load_memory_variables",
+    "retrieve_memory_id",
+    "load_memory_strategy",
+    "add_strategy",
+    "create_strategy_if_not_exists",
+    "create_memory",
+    "save_conversation_to_memory",
+    "get_memory_record",
+]

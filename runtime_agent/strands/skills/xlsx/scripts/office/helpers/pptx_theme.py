@@ -27,9 +27,9 @@ _RELATIONSHIP_RE = re.compile(
 
 
 def _sort_key(name: str) -> tuple[int, int]:
-    m = _MASTER_RE.match(name)
-    assert m is not None
-    return (_GROUP_ORDER[m.group("group")], int(m.group("num")))
+    master_match = _MASTER_RE.match(name)
+    assert master_match is not None
+    return (_GROUP_ORDER[master_match.group("group")], int(master_match.group("num")))
 
 
 def _rels_path(part: str) -> str:

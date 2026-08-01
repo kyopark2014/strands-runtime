@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Persist tasks.db via S3 Files using the working-copy + restore/persist pattern."""
 
 from __future__ import annotations
@@ -16,6 +30,7 @@ _DEFAULT_WORKING_DIR = os.path.join(_APPLICATION_DIR, "data")
 _DEFAULT_MOUNT = "/mnt/app-data"
 _APP_DATABASE_SEGMENT = "application-database"
 _PERSIST_DEBOUNCE_SECONDS = 20.0
+SQLITE_CONNECT_TIMEOUT_SECONDS = 5
 
 _persist_lock = threading.Lock()
 _persist_timer: threading.Timer | None = None
@@ -99,7 +114,11 @@ def _copy_db_files(source: str, destination: str) -> None:
 def _checkpoint_sqlite(db_path: str) -> None:
     if not os.path.isfile(db_path):
         return
-    conn = sqlite3.connect(db_path, timeout=5)
+    try:
+        conn = sqlite3.connect(db_path, timeout=SQLITE_CONNECT_TIMEOUT_SECONDS)
+    except sqlite3.Error as exc:
+        logger.warning("Failed to open task DB for checkpoint %s: %s", db_path, exc)
+        return
     try:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.commit()

@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import json
 import sys
@@ -20,7 +34,7 @@ try:
     )
     logger.info("MCP server initialized successfully")
 except Exception as e:
-        err_msg = f"Error: {str(e)}"
+        err_msg = f"Error: {type(e).__name__}"
         logger.info(f"{err_msg}")
 
 stocks = {}
@@ -39,7 +53,11 @@ def retrieve_stock_trend(company_name: str = "네이버", period: int = 30) -> s
     """
     logger.info(f"get_stock_trend --> company_name: {company_name}, period: {period}")
 
-    result_dict = trade_info.get_stock_trend(company_name, period)
+    try:
+        result_dict = trade_info.get_stock_trend(company_name, period)
+    except Exception as e:
+        logger.error("get_stock_trend failed: %s", type(e).__name__, exc_info=True)
+        return json.dumps({"error": type(e).__name__}, ensure_ascii=False)
 
     stocks[f"{company_name}_{period}"] = result_dict
 
@@ -56,15 +74,19 @@ def draw_stock_trend(company_name: str = "네이버", period: int = 30) -> Dict[
     """
     logger.info(f"draw_stock_trend --> company_name: {company_name}, period: {period}")
 
-    trend_dict = stocks.get(f"{company_name}_{period}")
-    if trend_dict is None:
-        logger.error(f"Trend not found for {company_name}_{period}")
-        trend_dict = trade_info.get_stock_trend(company_name, period)
-        stocks[f"{company_name}_{period}"] = trend_dict
+    try:
+        trend_dict = stocks.get(f"{company_name}_{period}")
+        if trend_dict is None:
+            logger.error(f"Trend not found for {company_name}_{period}")
+            trend_dict = trade_info.get_stock_trend(company_name, period)
+            stocks[f"{company_name}_{period}"] = trend_dict
 
-    logger.info(f"trend_dict: {trend_dict}")
+        logger.info(f"trend_dict: {trend_dict}")
 
-    return trade_info.draw_stock_trend(trend_dict)
+        return trade_info.draw_stock_trend(trend_dict)
+    except Exception as e:
+        logger.error("draw_stock_trend failed: %s", type(e).__name__, exc_info=True)
+        return {"error": [type(e).__name__], "path": []}
 
 if __name__ =="__main__":
     mcp.run(transport="stdio")

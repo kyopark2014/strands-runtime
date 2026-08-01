@@ -1,19 +1,25 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # modifed from: https://github.com/strands-agents/tools/blob/main/src/strands_tools/use_aws.py
 
 import io
 import os
-import json
 
-def load_config():
-    config = None
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    config_path = os.path.join(script_dir, "config.json")
-    
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)    
-    return config
+import utils
 
-config = load_config()
+config = utils.load_config()
 
 aws_access_key = config.get('aws', {}).get('access_key_id')
 aws_secret_key = config.get('aws', {}).get('secret_access_key')
@@ -104,6 +110,23 @@ SHAPE_TYPE_MAP = {
     "double": {"type": "number"},
     "long": {"type": "integer"},
 }
+
+
+def create_boto3_client(service_name: str, region_name: str = "us-west-2"):
+    """Create a boto3 client using optional config credentials."""
+    try:
+        if aws_access_key and aws_secret_key:
+            return boto3.client(
+                service_name,
+                region_name=region_name,
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                aws_session_token=aws_session_token,
+            )
+        return boto3.client(service_name, region_name=region_name)
+    except Exception:
+        logger.exception("Failed to create boto3 client for service '%s'", service_name)
+        raise
 
 
 @lru_cache(maxsize=128)
@@ -239,38 +262,14 @@ def to_pascal_case(service_name: str, input_str: str) -> str:
 
     try:
         # Validate using boto3
-        if aws_access_key and aws_secret_key:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2", 
-                aws_access_key_id=aws_access_key, 
-                aws_secret_access_key=aws_secret_key, 
-                aws_session_token=aws_session_token
-            )
-        else:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2"
-            )
+        client = create_boto3_client(service_name)
         service_model = client.meta.service_model
         service_model.operation_model(pascal_case)
         return pascal_case
     except Exception:
         try:
             # Fallback: search for matching operation name
-            if aws_access_key and aws_secret_key:
-                client = boto3.client(
-                    service_name, 
-                    region_name="us-west-2", 
-                    aws_access_key_id=aws_access_key, 
-                    aws_secret_access_key=aws_secret_key, 
-                    aws_session_token=aws_session_token
-                )
-            else:
-                client = boto3.client(
-                    service_name, 
-                    region_name="us-west-2"
-                )
+            client = create_boto3_client(service_name)
             operations = client.meta.service_model.operation_names
             snake_case = to_snake_case(input_str)
             result = next(
@@ -304,19 +303,7 @@ def check_boto3_validity(service_name: str, operation_name: str) -> Tuple[bool, 
         (False, "Unknown service: 'invalid_service'")
     """
     try:
-        if aws_access_key and aws_secret_key:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2", 
-                aws_access_key_id=aws_access_key, 
-                aws_secret_access_key=aws_secret_key, 
-                aws_session_token=aws_session_token
-            )
-        else:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2"
-            )
+        client = create_boto3_client(service_name)
         pascal_operation_name = to_pascal_case(service_name, operation_name)
         snake_operation_name = to_snake_case(pascal_operation_name)
 
@@ -330,7 +317,8 @@ def check_boto3_validity(service_name: str, operation_name: str) -> Tuple[bool, 
     except UnknownServiceError:
         return False, f"Unknown service: '{service_name}'"
     except Exception as e:  # pragma: no cover
-        return False, str(e)
+        logger.exception("boto3 validity check failed")
+        return False, type(e).__name__
 
 
 def generate_input_schema(service_name: str, operation_name: str) -> Dict[str, Any]:
@@ -358,19 +346,7 @@ def generate_input_schema(service_name: str, operation_name: str) -> Dict[str, A
 
     try:
         # Create a boto3 client and get the service model
-        if aws_access_key and aws_secret_key:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2", 
-                aws_access_key_id=aws_access_key, 
-                aws_secret_access_key=aws_secret_key, 
-                aws_session_token=aws_session_token
-            )
-        else:
-            client = boto3.client(
-                service_name, 
-                region_name="us-west-2"
-            )
+        client = create_boto3_client(service_name)
         service_model = client.meta.service_model
         pascal_operation_name = to_pascal_case(service_name, operation_name)
         operation_model = service_model.operation_model(pascal_operation_name)
@@ -384,4 +360,7 @@ def generate_input_schema(service_name: str, operation_name: str) -> Dict[str, A
         }
         return result
     except Exception as e:
-        raise RuntimeError(f"Error generating input schema: {str(e)}") from e
+        logger.exception("Error generating input schema")
+        raise RuntimeError(
+            f"Error generating input schema: {type(e).__name__}"
+        ) from e

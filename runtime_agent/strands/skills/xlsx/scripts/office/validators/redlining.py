@@ -11,6 +11,7 @@ Only the document body is compared. Headers, footers, footnotes and endnotes
 are separate parts and are not checked.
 """
 
+import logging
 import subprocess
 import tempfile
 import zipfile
@@ -20,6 +21,8 @@ import defusedxml.ElementTree as ET
 from defusedxml.common import DefusedXmlException
 
 from helpers import rendered_text, safe_extract
+
+logger = logging.getLogger(__name__)
 
 
 class RedliningValidator:
@@ -47,8 +50,9 @@ class RedliningValidator:
             try:
                 with zipfile.ZipFile(self.original_docx, "r") as zip_ref:
                     safe_extract(zip_ref, temp_path)
-            except Exception as e:
-                print(f"FAILED - Error unpacking original docx: {e}")
+            except Exception:
+                logger.warning("Error unpacking original docx", exc_info=True)
+                print("FAILED - Error unpacking original docx")
                 return False
 
             original_file = temp_path / "word" / "document.xml"
@@ -63,8 +67,9 @@ class RedliningValidator:
                 modified_root = modified_tree.getroot()
                 original_tree = ET.parse(original_file)
                 original_root = original_tree.getroot()
-            except (ET.ParseError, DefusedXmlException) as e:
-                print(f"FAILED - Error parsing XML files: {e}")
+            except (ET.ParseError, DefusedXmlException):
+                logger.warning("Error parsing XML files", exc_info=True)
+                print("FAILED - Error parsing XML files")
                 return False
 
             new_changes = self._new_tracked_changes(original_root, modified_root)
@@ -97,17 +102,17 @@ class RedliningValidator:
         return rendered_text(elem.text or "", preserve)
 
     def _text_elements(self, elem):
-        w = self.namespaces["w"]
+        word_ns = self.namespaces["w"]
         return [
             node
             for node in elem.iter()
-            if node.tag in (f"{{{w}}}t", f"{{{w}}}delText")
+            if node.tag in (f"{{{word_ns}}}t", f"{{{word_ns}}}delText")
         ]
 
     def _tracked_change_key(self, elem):
-        w = self.namespaces["w"]
+        word_ns = self.namespaces["w"]
         text = "".join(self._rendered_text(node) for node in self._text_elements(elem))
-        return (elem.tag, elem.get(f"{{{w}}}author"), elem.get(f"{{{w}}}date"), text)
+        return (elem.tag, elem.get(f"{{{word_ns}}}author"), elem.get(f"{{{word_ns}}}date"), text)
 
     def _new_tracked_changes(self, original_root, modified_root):
         original = self._tracked_change_elements(original_root)
@@ -129,7 +134,7 @@ class RedliningValidator:
             return self._tracked_change_key(elem)[:3]
 
         def text_of(elems):
-            return "".join(self._tracked_change_key(e)[3] for e in elems)
+            return "".join(self._tracked_change_key(change_elem)[3] for change_elem in elems)
 
         unmatched_original = {}
         for elem in original:
@@ -189,13 +194,16 @@ class RedliningValidator:
                 original_file.write_text(original_text, encoding="utf-8")
                 modified_file.write_text(modified_text, encoding="utf-8")
 
-                result = subprocess.run(
+                # Justification: fixed `git` binary + argv list over temp files, shell=False; no shell expansion.
+                # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                result = subprocess.run(  # nosec B603 — fixed `git` binary + argv list over temp files, shell=False
                     [
                         "git",
                         "diff",
                         "--word-diff=plain",
-                        "--word-diff-regex=.",  
-                        "-U0",  
+                        # Character-level word-diff: treat each char as a word.
+                        "--word-diff-regex=.",
+                        "-U0",
                         "--no-index",
                         str(original_file),
                         str(modified_file),
@@ -218,7 +226,9 @@ class RedliningValidator:
                     if content_lines:
                         return "\n".join(content_lines)
 
-                result = subprocess.run(
+                # Justification: fixed `git` binary + argv list over temp files, shell=False; no shell expansion.
+                # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+                result = subprocess.run(  # nosec B603 — fixed `git` binary + argv list over temp files, shell=False
                     [
                         "git",
                         "diff",

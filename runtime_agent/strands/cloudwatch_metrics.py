@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """CloudWatch custom metrics and dashboard helpers for Strands AgentCore runtime."""
 
 from __future__ import annotations
@@ -31,6 +45,21 @@ _MODEL_ID_REGION_VENDORS = frozenset(
 # e.g. claude-haiku-4-5-20251001-v1:0 → claude-haiku-4-5
 _MODEL_ID_DATED_VERSION_RE = re.compile(r"-\d{8}-v\d+(?::\d+)?$")
 _MODEL_ID_VERSION_SUFFIX_RE = re.compile(r"-v\d+:\d+$")
+# CloudWatch dimension value soft cap for ModelId (well under the 1024-byte limit).
+MODEL_ID_MAX_LENGTH = 64
+# Project/dimension values embedded in Metrics Insights / SEARCH expressions.
+_METRIC_DIM_SAFE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def _sanitize_metric_dimension(value: str, *, field: str = "dimension") -> str:
+    """Reject values unsafe to embed in CloudWatch query expressions.
+
+    Metrics Insights / SEARCH do not support bind parameters, so callers must
+    only interpolate validated identifiers (project name, metric name, etc.).
+    """
+    if not isinstance(value, str) or not _METRIC_DIM_SAFE_RE.fullmatch(value):
+        raise ValueError(f"Unsafe CloudWatch metric {field}: {value!r}")
+    return value
 
 
 def _short_model_id(model_id: str) -> str:
@@ -59,7 +88,7 @@ def _short_model_id(model_id: str) -> str:
 
     short = _MODEL_ID_DATED_VERSION_RE.sub("", short)
     short = _MODEL_ID_VERSION_SUFFIX_RE.sub("", short)
-    return short[:64] or "unknown"
+    return short[:MODEL_ID_MAX_LENGTH] or "unknown"
 
 METRIC_NAMESPACE = "Strands/AgentCoreRuntime"
 AGENTCORE_NAMESPACE = "AWS/Bedrock-AgentCore"
@@ -67,6 +96,16 @@ AGENTCORE_SERVICE = "AgentCore.Runtime"
 BEDROCK_NAMESPACE = "AWS/Bedrock"
 BEDROCK_USAGE_DASHBOARD_NAME = "Bedrock-Usage-Dashboard"
 INVOKE_OPERATION = "InvokeAgentRuntime"
+
+# Dashboard gauge axis maxima (monitoring thresholds, not hard service limits).
+LATENCY_GAUGE_MAX_MS = 30000  # Expected upper bound for InvokeAgentRuntime p99 latency
+# Gauge annotation thresholds (ms): green → amber → red for p99 latency.
+LATENCY_GAUGE_WARN_MS = 5000
+LATENCY_GAUGE_CRITICAL_MS = 15000
+ACTIVE_SESSIONS_GAUGE_MAX = 50  # Expected max concurrent AgentCore sessions for capacity view
+# Gauge annotation thresholds: green → amber → red for concurrent sessions.
+ACTIVE_SESSIONS_GAUGE_WARN = 10
+ACTIVE_SESSIONS_GAUGE_CRITICAL = 30
 
 # AgentCore Runtime pricing (USD)
 RUNTIME_CPU_COST_PER_VCPU_HOUR = 0.0895
@@ -306,7 +345,7 @@ def publish_token_metrics(model_id: str, message: Any) -> None:
     output_tokens = usage.get("output_tokens", 0)
     total_tokens = usage.get("total_tokens", input_tokens + output_tokens)
     if total_tokens <= 0:
-        logger.info(
+        logger.info(  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
             "Token usage present but total_tokens<=0; skip CloudWatch publish (model=%s usage=%s)",
             model_id,
             usage,
@@ -374,7 +413,7 @@ def publish_token_metrics(model_id: str, message: Any) -> None:
             Namespace=METRIC_NAMESPACE,
             MetricData=metric_data,
         )
-        logger.info(
+        logger.info(  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
             "Published token metrics: model=%s input=%s output=%s "
             "cache_read=%s cache_creation=%s hit_ratio=%.1f%% cost=$%.6f",
             model_short,
@@ -386,7 +425,7 @@ def publish_token_metrics(model_id: str, message: Any) -> None:
             estimated_cost,
         )
     except Exception as exc:
-        logger.warning("Failed to publish CloudWatch token metrics: %s", exc)
+        logger.warning("Failed to publish CloudWatch token metrics: %s", exc)  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
 
 
 def dashboard_name(project_name: str) -> str:
@@ -458,6 +497,10 @@ def _custom_metric_search_expression(
     stat: str = "Sum",
 ) -> str:
     """SEARCH expression for custom metrics published with multiple dimensions."""
+    project_name = _sanitize_metric_dimension(project_name, field="ProjectName")
+    metric_name = _sanitize_metric_dimension(metric_name, field="MetricName")
+    if not _METRIC_DIM_SAFE_RE.fullmatch(stat):
+        raise ValueError(f"Unsafe CloudWatch metric stat: {stat!r}")
     return (
         f"SEARCH('{{{METRIC_NAMESPACE},ProjectName,AgentRuntimeName,ModelId}} "
         f'ProjectName="{project_name}" MetricName="{metric_name}"\', '
@@ -508,15 +551,20 @@ def _tokens_by_model_pie_metrics(
     that raises "error while trying to get graph data".
     """
     del region
+    # Metrics Insights has no bind parameters; only interpolate sanitized ids.
+    project_name = _sanitize_metric_dimension(project_name, field="ProjectName")
+    # Bandit B608: CloudWatch Metrics Insights expression (not a DB SQL query).
+    # project_name is regex-validated by _sanitize_metric_dimension above.
+    expression = (  # nosec B608
+        f'SELECT SUM(TotalTokens) FROM SCHEMA("{METRIC_NAMESPACE}", '
+        f"ProjectName, AgentRuntimeName, ModelId) "
+        f"WHERE ProjectName = '{project_name}' "
+        f"GROUP BY ModelId"
+    )
     return [
         [
             {
-                "expression": (
-                    f'SELECT SUM(TotalTokens) FROM SCHEMA("{METRIC_NAMESPACE}", '
-                    f"ProjectName, AgentRuntimeName, ModelId) "
-                    f"WHERE ProjectName = '{project_name}' "
-                    f"GROUP BY ModelId"
-                ),
+                "expression": expression,
                 "label": "",
                 "id": "q1",
                 "period": period,
@@ -1253,12 +1301,12 @@ def build_dashboard_body(
                     "period": 300,
                     "stat": "p99",
                     "metrics": [invoke("Latency")],
-                    "yAxis": {"left": {"min": 0, "max": 30000}},
+                    "yAxis": {"left": {"min": 0, "max": LATENCY_GAUGE_MAX_MS}},
                     "annotations": {
                         "horizontal": [
                             {"color": "#2ca02c", "value": 0},
-                            {"color": "#ff9900", "value": 5000},
-                            {"color": "#d62728", "value": 15000},
+                            {"color": "#ff9900", "value": LATENCY_GAUGE_WARN_MS},
+                            {"color": "#d62728", "value": LATENCY_GAUGE_CRITICAL_MS},
                         ]
                     },
                 },
@@ -1282,12 +1330,15 @@ def build_dashboard_body(
                             AGENTCORE_SERVICE,
                         ]
                     ],
-                    "yAxis": {"left": {"min": 0, "max": 50}},
+                    "yAxis": {"left": {"min": 0, "max": ACTIVE_SESSIONS_GAUGE_MAX}},
                     "annotations": {
                         "horizontal": [
                             {"color": "#2ca02c", "value": 0},
-                            {"color": "#ff9900", "value": 10},
-                            {"color": "#d62728", "value": 30},
+                            {"color": "#ff9900", "value": ACTIVE_SESSIONS_GAUGE_WARN},
+                            {
+                                "color": "#d62728",
+                                "value": ACTIVE_SESSIONS_GAUGE_CRITICAL,
+                            },
                         ]
                     },
                 },

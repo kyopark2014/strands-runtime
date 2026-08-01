@@ -2,15 +2,22 @@ import json
 import sys
 
 from pypdf import PdfReader, PdfWriter
+from pypdf.errors import PyPdfError
 
 from extract_form_field_info import get_field_info
 
 
-
-
 def fill_pdf_fields(input_pdf_path: str, fields_json_path: str, output_pdf_path: str):
-    with open(fields_json_path) as f:
-        fields = json.load(f)
+    try:
+        with open(fields_json_path) as f:
+            fields = json.load(f)
+    except FileNotFoundError:
+        print(f"ERROR: Fields JSON not found: {fields_json_path}")
+        sys.exit(1)
+    except json.JSONDecodeError as e:
+        print(f"ERROR: Invalid fields JSON ({fields_json_path}): {e}")
+        sys.exit(1)
+
     fields_by_page = {}
     for field in fields:
         if "value" in field:
@@ -19,8 +26,15 @@ def fill_pdf_fields(input_pdf_path: str, fields_json_path: str, output_pdf_path:
             if page not in fields_by_page:
                 fields_by_page[page] = {}
             fields_by_page[page][field_id] = field["value"]
-    
-    reader = PdfReader(input_pdf_path)
+
+    try:
+        reader = PdfReader(input_pdf_path)
+    except FileNotFoundError:
+        print(f"ERROR: Input PDF not found: {input_pdf_path}")
+        sys.exit(1)
+    except PyPdfError as e:
+        print(f"ERROR: Failed to read PDF ({input_pdf_path}): {e}")
+        sys.exit(1)
 
     has_error = False
     field_info = get_field_info(reader)
@@ -42,14 +56,18 @@ def fill_pdf_fields(input_pdf_path: str, fields_json_path: str, output_pdf_path:
     if has_error:
         sys.exit(1)
 
-    writer = PdfWriter(clone_from=reader)
-    for page, field_values in fields_by_page.items():
-        writer.update_page_form_field_values(writer.pages[page - 1], field_values, auto_regenerate=False)
+    try:
+        writer = PdfWriter(clone_from=reader)
+        for page, field_values in fields_by_page.items():
+            writer.update_page_form_field_values(writer.pages[page - 1], field_values, auto_regenerate=False)
 
-    writer.set_need_appearances_writer(True)
-    
-    with open(output_pdf_path, "wb") as f:
-        writer.write(f)
+        writer.set_need_appearances_writer(True)
+
+        with open(output_pdf_path, "wb") as f:
+            writer.write(f)
+    except (OSError, PyPdfError) as e:
+        print(f"ERROR: Failed to write filled PDF ({output_pdf_path}): {e}")
+        sys.exit(1)
 
 
 def validation_error_for_field_value(field_info, field_value):

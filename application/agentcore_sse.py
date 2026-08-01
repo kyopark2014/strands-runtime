@@ -1,0 +1,197 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+import json
+import logging
+import sys
+
+try:
+    from application.tool_result_parsers import (
+        ToolResultParseError,
+        _append_references_to_result,
+        get_tool_info,
+    )
+except ImportError:
+    from tool_result_parsers import (
+        ToolResultParseError,
+        _append_references_to_result,
+        get_tool_info,
+    )
+
+logging.basicConfig(
+    level=logging.INFO,  # Default to INFO level
+    format='%(filename)s:%(lineno)d | %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stderr)
+    ]
+)
+logger = logging.getLogger("agentcore_sse")
+
+
+def add_notification(notification_queue, message):
+    if notification_queue is not None:
+        notification_queue.notify(message)
+
+
+def update_streaming_result(notification_queue, message):
+    if notification_queue is not None:
+        notification_queue.stream(message)
+
+
+def tool_slot_update(notification_queue, slot_key: str, message: str):
+    if notification_queue is not None:
+        notification_queue.tool_update(slot_key, message)
+
+
+tool_info_list = dict()
+tool_result_list = dict()
+tool_name_list = dict()
+
+
+def normalize_bedrock_message_content(content):
+    """
+    LangChain/Bedrock/Claude가 반환하는 message.content를 화면용 문자열로 만든다.
+    - str: 그대로
+    - list[dict]: Anthropic content blocks (type text, tool_use 등)에서 텍스트만 이어붙임
+    - dict: 단일 블록이면 text 키 사용
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if content.get("type") == "text" and "text" in content:
+            return str(content["text"])
+        if "text" in content:
+            return str(content["text"])
+        return json.dumps(content, ensure_ascii=False)
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text" and "text" in block:
+                    parts.append(str(block["text"]))
+                elif "text" in block:
+                    parts.append(str(block["text"]))
+                elif block.get("type") == "tool_use":
+                    continue
+                else:
+                    parts.append(json.dumps(block, ensure_ascii=False))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return str(content)
+
+
+def _collect_tool_result_artifacts(tool_name, tool_result, references: list, image_url: list) -> None:
+    try:
+        content, urls, refs = get_tool_info(tool_name, tool_result)
+    except ToolResultParseError:
+        logger.error(
+            "Failed to parse tool result artifacts for %s",
+            tool_name,
+            exc_info=True,
+        )
+        return
+    if refs:
+        for reference in refs:
+            references.append(reference)
+        logger.info(f"refs: {refs}")
+    if urls:
+        for url in urls:
+            image_url.append(url)
+        logger.info(f"urls: {urls}")
+    if content:
+        logger.info(f"content: {content}")
+
+
+def _process_strands_sse_event(data_json: dict, notification_queue, stream_state: dict) -> None:
+    """Handle one strands SSE event and update stream_state in place."""
+    if "data" in data_json:
+        text = normalize_bedrock_message_content(data_json["data"])
+        logger.info(f"[data] {text}")
+        stream_state["current"] += text
+        update_streaming_result(notification_queue, stream_state["current"])
+        return
+
+    if "result" in data_json:
+        final_output = data_json["result"]
+        logger.info(f"[result] {final_output}")
+        if isinstance(final_output, dict):
+            stream_state["result"] = final_output.get("messages", "")
+            if "image_url" in final_output:
+                stream_state["image_url"] = final_output.get("image_url", [])
+                logger.info(f"image_url: {stream_state['image_url']}")
+        else:
+            stream_state["result"] = final_output
+        logger.info(f"result: {stream_state['result']}")
+        return
+
+    if "tool" in data_json:
+        tool = data_json["tool"]
+        tool_input = data_json["input"]
+        tool_use_id = data_json["toolUseId"]
+        tool_name_list[tool_use_id] = tool
+        if tool_use_id not in tool_info_list:
+            stream_state["current"] = ""
+            tool_info_list[tool_use_id] = True
+        tool_slot_update(
+            notification_queue,
+            f"{tool_use_id}:input",
+            f"Tool: {tool}, Input: {tool_input}",
+        )
+        return
+
+    if "toolResult" in data_json:
+        tool_result = data_json["toolResult"]
+        tool_use_id = data_json["toolUseId"]
+        tool_name = tool_name_list.get(tool_use_id, "")
+        logger.info(f"[tool_result] {tool_result}")
+        tool_slot_update(
+            notification_queue,
+            f"{tool_use_id}:result",
+            f"Tool Result: {str(tool_result)}",
+        )
+        _collect_tool_result_artifacts(
+            tool_name,
+            tool_result,
+            stream_state["references"],
+            stream_state["image_url"],
+        )
+
+
+def _finalize_agent_result(result, current, references: list, notification_queue):
+    empty = (
+        result == ""
+        or result == []
+        or result is None
+        or (isinstance(result, str) and not result.strip())
+    )
+    if empty and current:
+        result = current
+
+    if references:
+        result = _append_references_to_result(result, references)
+
+    if notification_queue is not None:
+        final = result
+        if not isinstance(final, str):
+            final = (
+                json.dumps(final, ensure_ascii=False)
+                if isinstance(final, (list, dict))
+                else str(final)
+            )
+        notification_queue.result(final)
+
+    return result

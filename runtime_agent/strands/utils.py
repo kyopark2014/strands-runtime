@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import sys
 import json
@@ -16,30 +30,125 @@ logger = logging.getLogger("utils")
 
 workingDir = os.path.dirname(os.path.abspath(__file__))
 config_path = os.path.join(workingDir, "config.json")
-    
-def load_config():
-    config = None
+PROJECT_NAME_FALLBACK = "strands-runtime"
 
-    try: 
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = json.load(f)
+def _materialize_config(file_path: str, config: dict) -> None:
+    """Write config.json so modules that open the file directly still work."""
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except Exception as write_err:
+        logger.warning(f"Could not write fallback config.json: {write_err}")
+
+
+def _derive_s3_bucket(config: dict) -> str:
+    project = (config.get("projectName") or "").strip()
+    account = (config.get("accountId") or "").strip()
+    region = (config.get("region") or "").strip()
+    if project and account and region:
+        return f"storage-for-{project}-{account}-{region}"
+    return ""
+
+
+def load_config(path: str | None = None):
+    """Load merged config from APP_CONFIG_JSON and a JSON file.
+
+    Runtime images exclude config.json (.dockerignore). AgentCore / ECS inject
+    APP_CONFIG_JSON instead; when the file is missing this also materializes it
+    so modules that read config.json directly keep working.
+
+    Args:
+        path: Optional config file path. Defaults to runtime_agent/strands/config.json.
+              Callers outside strands (e.g. add_content.py) can pass
+              application/config.json.
+    """
+    config = {}
+    file_path = path or config_path
+    had_file = False
+
+    raw = os.environ.get("APP_CONFIG_JSON")
+    if raw:
+        try:
+            config.update(json.loads(raw))
+        except Exception as e:
+            logger.error(f"Error parsing APP_CONFIG_JSON: {e}")
+
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            file_cfg = json.load(f)
+        had_file = True
+        merged = dict(file_cfg)
+        merged.update({k: v for k, v in config.items() if v not in (None, "")})
+        config = merged
     except Exception as e:
         logger.error(f"Error loading config: {e}")
-        config = {}
+        if not config:
+            session = boto3.Session()
+            region = (
+                os.environ.get("AWS_REGION")
+                or os.environ.get("AWS_DEFAULT_REGION")
+                or session.region_name
+            )
+            config["region"] = region
+            config["projectName"] = os.environ.get("PROJECT_NAME") or PROJECT_NAME_FALLBACK
+            if os.environ.get("KNOWLEDGE_BASE_ID"):
+                config["knowledge_base_id"] = os.environ["KNOWLEDGE_BASE_ID"]
 
-        session = boto3.Session()
-        region = session.region_name
-        config['region'] = region
-        config['projectName'] = "power-trade"
-        
-        sts = boto3.client("sts")
-        response = sts.get_caller_identity()
-        accountId = response["Account"]
-        config['accountId'] = accountId
-        
-        with open(config_path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)    
+            sts = boto3.client("sts")
+            response = sts.get_caller_identity()
+            config["accountId"] = response["Account"]
+
+    # Env vars always win for critical RAG settings.
+    if os.environ.get("KNOWLEDGE_BASE_ID"):
+        config["knowledge_base_id"] = os.environ["KNOWLEDGE_BASE_ID"]
+    if os.environ.get("PROJECT_NAME"):
+        config["projectName"] = os.environ["PROJECT_NAME"]
+    if os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"):
+        config["region"] = os.environ.get("AWS_REGION") or os.environ.get(
+            "AWS_DEFAULT_REGION"
+        )
+    if os.environ.get("MEMORY_ID"):
+        config["memory_id"] = os.environ["MEMORY_ID"]
+    if os.environ.get("AGENTCORE_MEMORY_ROLE"):
+        config["agentcore_memory_role"] = os.environ["AGENTCORE_MEMORY_ROLE"]
+
+    if not (config.get("s3_bucket") or "").strip():
+        derived = _derive_s3_bucket(config)
+        if derived:
+            config["s3_bucket"] = derived
+            if not (config.get("s3_arn") or "").strip():
+                config["s3_arn"] = f"arn:aws:s3:::{derived}"
+
+    if config and not had_file:
+        _materialize_config(file_path, config)
+
     return config
+
+
+def get_config(path: str | None = None) -> dict:
+    """Return fresh config (prefer APP_CONFIG_JSON over stale import-time snapshots)."""
+    return load_config(path)
+
+
+def get_sharing_url() -> str:
+    """CloudFront sharing base URL, or empty string when unset."""
+    return (get_config().get("sharing_url") or "").strip().rstrip("/")
+
+
+def get_s3_bucket() -> str:
+    """Storage bucket name from config / APP_CONFIG_JSON / derived default."""
+    return (get_config().get("s3_bucket") or "").strip()
+
+
+def get_aws_region() -> str:
+    cfg = get_config()
+    return (
+        (cfg.get("region") or "").strip()
+        or os.environ.get("AWS_REGION")
+        or os.environ.get("AWS_DEFAULT_REGION")
+        or "us-west-2"
+    )
+
 
 config = load_config()
 

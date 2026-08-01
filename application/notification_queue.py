@@ -1,6 +1,19 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import queue
-from typing import Any
 
 logger = logging.getLogger("notification_queue")
 
@@ -9,7 +22,7 @@ class QueueNotificationSink:
     """Forwards agent output to a queue for SSE streaming."""
 
     def __init__(self, message_queue: queue.Queue):
-        self._q = message_queue
+        self._message_queue = message_queue
         self._streaming_slot = None
         self._tool_slots: dict[str, object] = {}
         self._tool_names: dict[str, str] = {}
@@ -21,16 +34,16 @@ class QueueNotificationSink:
 
     def notify(self, message: str):
         self._streaming_slot = None
-        self._q.put({"type": "info", "data": message})
+        self._message_queue.put({"type": "info", "data": message})
 
     def respond(self, message: str):
         self._streaming_slot = None
-        self._q.put({"type": "markdown", "data": message})
+        self._message_queue.put({"type": "markdown", "data": message})
 
     def stream(self, message: str):
         if self._streaming_slot is None:
             self._streaming_slot = object()
-        self._q.put({"type": "markdown", "data": message})
+        self._message_queue.put({"type": "markdown", "data": message})
 
     def commit_text_segment(self, message: str):
         """Persist a completed assistant text segment before tool events."""
@@ -38,19 +51,21 @@ class QueueNotificationSink:
         if not stripped:
             return
         self._streaming_slot = None
-        self._q.put({"type": "text_segment", "data": stripped})
+        self._message_queue.put({"type": "text_segment", "data": stripped})
 
     def result(self, message: str):
         was_streaming = self._streaming_slot is not None
         self._streaming_slot = None
         if not was_streaming:
-            self._q.put({"type": "markdown", "data": message})
+            self._message_queue.put({"type": "markdown", "data": message})
 
     def tool_update(self, tool_use_id: str, message: str):
         self._streaming_slot = None
         if tool_use_id not in self._tool_slots:
             self._tool_slots[tool_use_id] = object()
-        self._q.put({"type": "info", "data": message, "toolUseId": tool_use_id})
+        self._message_queue.put(
+            {"type": "info", "data": message, "toolUseId": tool_use_id}
+        )
 
     def register_tool(self, tool_use_id: str, name: str):
         self._tool_names[tool_use_id] = name

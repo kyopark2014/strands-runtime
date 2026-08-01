@@ -1,3 +1,19 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Chat facade: owns module-level state and re-exports focused submodules."""
+
 import utils
 import info
 import bedrock_data_retention
@@ -7,52 +23,19 @@ import uuid
 import logging
 import sys
 import re
-import base64
-import PyPDF2
-import csv
 import os
 import json
 
 from botocore.config import Config
-from urllib import parse
 from langchain_aws import ChatBedrock
 from langchain_aws import ChatBedrockConverse
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from io import BytesIO
-from PIL import Image
-from langchain_core.documents import Document
 from botocore.exceptions import ClientError
-from langchain_core.messages import HumanMessage, AIMessage
-
-# Simple memory class to replace ConversationBufferWindowMemory
-class SimpleMemory:
-    def __init__(self, k=5):
-        self.k = k
-        self.chat_memory = SimpleChatMemory()
-    
-    def load_memory_variables(self, inputs):
-        return {"chat_history": self.chat_memory.messages[-self.k:] if len(self.chat_memory.messages) > self.k else self.chat_memory.messages}
-
-class SimpleChatMemory:
-    def __init__(self):
-        self.messages = []
-    
-    def add_user_message(self, message):
-        self.messages.append(HumanMessage(content=message))
-    
-    def add_ai_message(self, message):
-        self.messages.append(AIMessage(content=message))
-    
-    def clear(self):
-        self.messages = []
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
-    format='%(filename)s:%(lineno)d | %(message)s',
-    handlers=[
-        logging.StreamHandler(sys.stderr)
-    ]
+    format="%(filename)s:%(lineno)d | %(message)s",
+    handlers=[logging.StreamHandler(sys.stderr)],
 )
 logger = logging.getLogger("chat")
 
@@ -66,20 +49,30 @@ config = utils.load_config()
 bedrock_region = config.get("region", "us-west-2")
 projectName = config.get("projectName", "strands-runtime")
 accountId = config.get("accountId", None)
-knowledge_base_id = config.get('knowledge_base_id', None)
+knowledge_base_id = config.get("knowledge_base_id", None)
 account_id = config.get("accountId", None)
-user_id = 'agent'
+user_id = "agent"
 
 if accountId is None:
-    sts = boto3.client("sts")
-    accountId = sts.get_caller_identity()["Account"]
-    config["accountId"] = accountId
+    try:
+        sts = boto3.client("sts")
+        accountId = sts.get_caller_identity()["Account"]
+        config["accountId"] = accountId
+    except Exception:
+        logger.exception("Failed to resolve AWS account ID via STS")
+        raise
+account_id = accountId
 region = config["region"] if "region" in config else "us-west-2"
 logger.info(f"region: {region}")
 
-s3_prefix = 'docs'
-s3_image_prefix = 'images'
-doc_prefix = s3_prefix+'/'
+s3_prefix = "docs"
+s3_image_prefix = "images"
+doc_prefix = s3_prefix + "/"
+capture_prefix = "captures"
+
+s3_bucket = config.get("s3_bucket")
+path = config.get("sharing_url")
+sharing_url = path
 
 model_name = "Claude 4.6 Sonnet"
 debug_mode = "Enable"
@@ -87,55 +80,84 @@ models = info.get_model_info(model_name)
 model_id = models[0]["model_id"]
 model_type = models[0]["model_type"]
 bedrock_region = config.get("region", "us-west-2")
-reasoning_mode = 'Disable'
-skill_mode = 'Disable'
+reasoning_mode = "Disable"
+skill_mode = "Disable"
 guardrail_enabled = True
 memory_enabled = False
+
+# Memory related variables
+MSG_LENGTH = 100
+map_chain = dict()
+memory_chain = None
 memory_id = None
 actor_id = None
 session_id = None
 
-# Local short-term chat memory (not AgentCore Memory)
-MSG_LENGTH = 100
-map_chain = dict()
-memory_chain = None
+# RAG scratch state
+number_of_results = 4
+reference_docs = []
+contentList = []
 
-aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-aws_region = os.environ.get('AWS_DEFAULT_REGION', 'us-west-2')
+fileId = uuid.uuid4().hex
+
+aws_access_key = os.environ.get("AWS_ACCESS_KEY_ID")
+aws_secret_key = os.environ.get("AWS_SECRET_ACCESS_KEY")
+aws_session_token = os.environ.get("AWS_SESSION_TOKEN")
+aws_region = os.environ.get("AWS_DEFAULT_REGION", "us-west-2")
+
+
+def _module_model_id() -> str:
+    """Return the module-level model_id without indexing globals()."""
+    return model_id
+
 
 def is_fable_model(model_id: str | None = None) -> bool:
     if not model_id:
-        model_id = globals().get("model_id", "")
+        model_id = _module_model_id()
     return "fable" in model_id.lower()
 
 
 def uses_adaptive_thinking(model_id: str | None = None) -> bool:
     if not model_id:
-        model_id = globals().get("model_id", "")
+        model_id = _module_model_id()
     model_id = model_id.lower()
     return "fable" in model_id or "claude-sonnet-5" in model_id
+
+
+# Model output token limits (from Anthropic / Bedrock model docs and quotas).
+CLAUDE_5_MAX_OUTPUT_TOKENS = 128000  # Claude 5 Sonnet/Opus, Fable, Opus 4.6 API limit
+CLAUDE_OPUS_4_5_MAX_OUTPUT_TOKENS = 64000  # Claude Opus 4.5 / Sonnet 4 / Haiku 4
+CLAUDE_OPUS_4_MAX_OUTPUT_TOKENS = 32000  # Claude Opus 4
+LEGACY_MODEL_MAX_OUTPUT_TOKENS = 8192  # Default for older / unspecified models
+
+RESULT_TAG_OPEN = "<result>"
+RESULT_TAG_CLOSE = "</result>"
+RESULT_TAG_OPEN_LEN = len(RESULT_TAG_OPEN)
+RESULT_TAG_CLOSE_LEN = len(RESULT_TAG_CLOSE)
+
+# Reserve tokens for response formatting and safety margin when extended thinking is enabled.
+REASONING_TOKEN_BUFFER = 1000
 
 
 def get_max_output_tokens(model_id: str = "") -> int:
     """Return the max output tokens based on the model ID."""
     mid = (model_id or "").lower()
     if is_fable_model(model_id):
-        return 128000
+        return CLAUDE_5_MAX_OUTPUT_TOKENS
     if "claude-sonnet-5" in mid or "claude-5-sonnet" in mid:
-        return 128000
+        return CLAUDE_5_MAX_OUTPUT_TOKENS
     if "claude-opus-5" in mid or "claude-5-opus" in mid:
-        return 128000
+        return CLAUDE_5_MAX_OUTPUT_TOKENS
     if "claude-opus-4-6" in mid:
-        return 128000
+        return CLAUDE_5_MAX_OUTPUT_TOKENS
     if "claude-opus-4-5" in mid:
-        return 64000
+        return CLAUDE_OPUS_4_5_MAX_OUTPUT_TOKENS
     if "claude-opus-4" in mid or "claude-4-opus" in mid:
-        return 32000
+        return CLAUDE_OPUS_4_MAX_OUTPUT_TOKENS
     if "claude-sonnet-4" in mid or "claude-4-sonnet" in mid or "claude-haiku-4" in mid:
-        return 64000
-    return 8192
+        return CLAUDE_OPUS_4_5_MAX_OUTPUT_TOKENS
+    return LEGACY_MODEL_MAX_OUTPUT_TOKENS
+
 
 def update(
     userId=None,
@@ -182,6 +204,7 @@ def update(
     if memoryEnabled is not None and memory_enabled != memoryEnabled:
         memory_enabled = memoryEnabled
         logger.info(f"memory_enabled: {memory_enabled}")
+
 
 def _guardrail_config() -> dict | None:
     if not guardrail_enabled:
@@ -245,178 +268,56 @@ def check_input_guardrail(text: str) -> tuple[bool, str]:
         logger.error(f"apply_guardrail failed: {e}")
     return False, text
 
-def create_object(key, body):
-    """
-    Create an object in S3 and return the URL. If the file already exists, append the new content.
-    """
-    
-    # Content-Type based on file extension
-    content_type = 'application/octet-stream'  # default value
-    if key.endswith('.html'):
-        content_type = 'text/html'
-    elif key.endswith('.md'):
-        content_type = 'text/markdown'
-    
-    if aws_access_key and aws_secret_key:
-        s3_client = boto3.client(
-            service_name='s3',
-            region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-        )
-    else:
-        s3_client = boto3.client(
-            service_name='s3',
-            region_name=bedrock_region,
-        )
-        
-    s3_client.put_object(
-        Bucket=s3_bucket,
-        Key=key,
-        Body=body,
-        ContentType=content_type
-    )  
 
-def updata_object(key, body, direction):
-    """
-    Create an object in S3 and return the URL. If the file already exists, append the new content.
-    """
-    if aws_access_key and aws_secret_key:
-        s3_client = boto3.client(
-            service_name='s3',
-            region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
-        )
-    else:
-        s3_client = boto3.client(
-            service_name='s3',
-            region_name=bedrock_region,
-        )
-
-    try:
-        # Check if file exists
-        try:
-            response = s3_client.get_object(Bucket=s3_bucket, Key=key)
-            existing_body = response['Body'].read().decode('utf-8')
-            # Append new content to existing content
-
-            if direction == 'append':
-                updated_body = existing_body + '\n' + body
-            else: # prepend
-                updated_body = body + '\n' + existing_body
-        except s3_client.exceptions.NoSuchKey:
-            # File doesn't exist, use new body as is
-            updated_body = body
-            
-        # Content-Type based on file extension
-        content_type = 'application/octet-stream'  # default value
-        if key.endswith('.html'):
-            content_type = 'text/html'
-        elif key.endswith('.md'):
-            content_type = 'text/markdown'
-            
-        # Upload the updated content
-        s3_client.put_object(
-            Bucket=s3_bucket,
-            Key=key,
-            Body=updated_body,
-            ContentType=content_type
-        )
-        
-    except Exception as e:
-        logger.error(f"Error updating object in S3: {str(e)}")
-        raise e
-    
 def traslation(chat, text, input_language, output_language):
     system = (
-        "You are a helpful assistant that translates {input_language} to {output_language} in <article> tags." 
+        "You are a helpful assistant that translates {input_language} to {output_language} in <article> tags."
         "Put it in <result> tags."
     )
     human = "<article>{text}</article>"
-    
+
     prompt = ChatPromptTemplate.from_messages([("system", system), ("human", human)])
-    
-    chain = prompt | chat    
-    try: 
+
+    chain = prompt | chat
+    try:
         result = chain.invoke(
             {
                 "input_language": input_language,
                 "output_language": output_language,
                 "text": text,
             }
-        )        
+        )
         msg = result.content
     except Exception:
         err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}")     
-        raise Exception ("Not able to request to LLM")
+        logger.info(f"error message: {err_msg}")
+        raise Exception("Not able to request to LLM")
 
-    return msg[msg.find('<result>')+8:len(msg)-9] # remove <result> tag
+    start = msg.find(RESULT_TAG_OPEN) + RESULT_TAG_OPEN_LEN
+    end = len(msg) - RESULT_TAG_CLOSE_LEN
+    return msg[start:end]
 
-def initiate():
-    global memory_chain, map_chain, user_id
-
-    # Preserve the logged-in user_id for AgentCore Memory actor isolation.
-    # Do NOT replace it with a random UUID.
-    effective_user_id = user_id if user_id and str(user_id).strip() else "default"
-    if effective_user_id != user_id:
-        user_id = effective_user_id
-        logger.info(f"user_id fallback for local memory: {user_id}")
-
-    # general conversation memory (local short-term, not AgentCore Memory)
-    if user_id in map_chain:
-        logger.info(f"memory exist. reuse it!")
-        memory_chain = map_chain[user_id]
-    else:
-        logger.info(f"memory not exist. create new memory!")
-        memory_chain = SimpleMemory(k=5)
-        map_chain[user_id] = memory_chain
-
-def clear_chat_history():
-    global memory_chain
-    # Initialize memory_chain if it doesn't exist
-    if memory_chain is None:
-        initiate()
-    
-    if memory_chain and hasattr(memory_chain, 'chat_memory'):
-        memory_chain.chat_memory.clear()
-    else:
-        memory_chain = SimpleMemory(k=5)
-    map_chain[user_id] = memory_chain
-
-def save_chat_history(text, msg):
-    global memory_chain
-    # Initialize memory_chain if it doesn't exist
-    if memory_chain is None:
-        initiate()
-    
-    if memory_chain and hasattr(memory_chain, 'chat_memory'):
-        memory_chain.chat_memory.add_user_message(text)
-        if len(msg) > MSG_LENGTH:
-            memory_chain.chat_memory.add_ai_message(msg[:MSG_LENGTH])                          
-        else:
-            memory_chain.chat_memory.add_ai_message(msg)
 
 def isKorean(text):
     # check korean
-    pattern_hangul = re.compile('[\u3131-\u3163\uac00-\ud7a3]+')
+    pattern_hangul = re.compile("[\u3131-\u3163\uac00-\ud7a3]+")
     word_kor = pattern_hangul.search(str(text))
 
-    if word_kor and word_kor != 'None':
+    if word_kor and word_kor != "None":
         return True
     else:
         return False
-    
+
+
 def get_chat(extended_thinking):
-    if model_type == 'claude':
+    if model_type == "claude":
         maxOutputTokens = get_max_output_tokens(model_id)
     else:
         maxOutputTokens = 5120
-    
-    logger.info(f"LLM: bedrock_region: {bedrock_region}, modelId: {model_id}, model_type: {model_type}")
+
+    logger.info(
+        f"LLM: bedrock_region: {bedrock_region}, modelId: {model_id}, model_type: {model_type}"
+    )
 
     if "fable" in model_id.lower():
         bedrock_data_retention.ensure_fable_data_retention(
@@ -461,441 +362,113 @@ def get_chat(extended_thinking):
         converse_chat.streaming = False
         return converse_chat
 
-    if model_type == 'nova':
+    if model_type == "nova":
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
-    elif model_type == 'claude':
-        STOP_SEQUENCE = "\n\nHuman:" 
-                          
+    elif model_type == "claude":
+        STOP_SEQUENCE = "\n\nHuman:"
+
     # Set AWS credentials
-    aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-    
-    # bedrock   
-    if aws_access_key and aws_secret_key:
+    aws_access_key_local = os.environ.get("AWS_ACCESS_KEY_ID")
+    aws_secret_key_local = os.environ.get("AWS_SECRET_ACCESS_KEY")
+    aws_session_token_local = os.environ.get("AWS_SESSION_TOKEN")
+
+    # bedrock
+    if aws_access_key_local and aws_secret_key_local:
         boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
+            service_name="bedrock-runtime",
             region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token,
+            aws_access_key_id=aws_access_key_local,
+            aws_secret_access_key=aws_secret_key_local,
+            aws_session_token=aws_session_token_local,
             config=Config(
-                retries = {
-                    'max_attempts': 30
-                },
-                read_timeout=300
-            )
+                retries={"max_attempts": 30},
+                read_timeout=300,
+            ),
         )
     else:
         boto3_bedrock = boto3.client(
-            service_name='bedrock-runtime',
+            service_name="bedrock-runtime",
             region_name=bedrock_region,
-            config=Config(
-                retries = {
-                    'max_attempts': 30
-                }
-            )
+            config=Config(retries={"max_attempts": 30}),
         )
-    if model_type != 'openai' and extended_thinking == 'Enable' and not uses_adaptive_thinking(model_id):
-        maxReasoningOutputTokens=64000
+    if (
+        model_type != "openai"
+        and extended_thinking == "Enable"
+        and not uses_adaptive_thinking(model_id)
+    ):
+        maxReasoningOutputTokens = 64000
         logger.info(f"extended_thinking: {extended_thinking}")
-        thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
+        thinking_budget = min(
+            maxOutputTokens, maxReasoningOutputTokens - REASONING_TOKEN_BUFFER
+        )
 
         parameters = {
-            "max_tokens":maxReasoningOutputTokens,
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": thinking_budget
-            },
-            "stop_sequences": [STOP_SEQUENCE]
+            "max_tokens": maxReasoningOutputTokens,
+            "thinking": {"type": "enabled", "budget_tokens": thinking_budget},
+            "stop_sequences": [STOP_SEQUENCE],
         }
-    elif model_type != 'openai' and extended_thinking == 'Disable':
+    elif model_type != "openai" and extended_thinking == "Disable":
         parameters = {
-            "max_tokens":maxOutputTokens,     
-            "stop_sequences": [STOP_SEQUENCE]
+            "max_tokens": maxOutputTokens,
+            "stop_sequences": [STOP_SEQUENCE],
         }
         if not uses_adaptive_thinking(model_id):
             parameters["temperature"] = 0.1
             parameters["top_k"] = 250
-    elif model_type != 'openai' and uses_adaptive_thinking(model_id):
+    elif model_type != "openai" and uses_adaptive_thinking(model_id):
         parameters = {
             "max_tokens": maxOutputTokens,
             "stop_sequences": [STOP_SEQUENCE],
         }
     else:
         parameters = {
-            "max_tokens":maxOutputTokens,     
-            "stop_sequences": [STOP_SEQUENCE]
+            "max_tokens": maxOutputTokens,
+            "stop_sequences": [STOP_SEQUENCE],
         }
 
-    chat = ChatBedrock(   # new chat model
+    chat = ChatBedrock(  # new chat model
         model_id=model_id,
-        client=boto3_bedrock, 
+        client=boto3_bedrock,
         model_kwargs=parameters,
-        region_name=bedrock_region
-    )    
-    
+        region_name=bedrock_region,
+    )
+
     return chat
 
-def get_summary(docs):    
-    llm = get_chat(extended_thinking=reasoning_mode)
-
-    text = ""
-    for doc in docs:
-        text = text + doc
-    
-    if isKorean(text)==True:
-        system = (
-            "다음의 <article> tag안의 문장을 요약해서 500자 이내로 설명하세오."
-        )
-    else: 
-        system = (
-            "Here is pieces of article, contained in <article> tags. Write a concise summary within 500 characters."
-        )
-    
-    human = "<article>{text}</article>"
-    
-    prompt = ChatPromptTemplate.from_messages([("system", system), ("human", human)])
-    
-    chain = prompt | llm    
-    try: 
-        result = chain.invoke(
-            {
-                "text": text
-            }
-        )
-        
-        summary = result.content
-        logger.info(f"esult of summarization: {summary}")
-    except Exception:
-        err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}") 
-        raise Exception ("Not able to request to LLM")
-    
-    return summary
-
-# load documents from s3 for pdf and txt
-def load_document(file_type, s3_file_name):
-    # Set AWS credentials
-    aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-    
-    if aws_access_key and aws_secret_key:
-        s3r = boto3.resource(
-            "s3",
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token
-        )
-    else:
-        s3r = boto3.resource("s3")
-        
-    doc = s3r.Object(s3_bucket, s3_prefix+'/'+s3_file_name)
-    logger.info(f"s3_bucket: {s3_bucket}, s3_prefix: {s3_prefix}, s3_file_name: {s3_file_name}")
-    
-    contents = ""
-    if file_type == 'pdf':
-        contents = doc.get()['Body'].read()
-        reader = PyPDF2.PdfReader(BytesIO(contents))
-        
-        raw_text = []
-        for page in reader.pages:
-            raw_text.append(page.extract_text())
-        contents = '\n'.join(raw_text)    
-        
-    elif file_type == 'txt' or file_type == 'md':        
-        contents = doc.get()['Body'].read().decode('utf-8')
-        
-    logger.info(f"contents: {contents}")
-    new_contents = str(contents).replace("\n"," ") 
-    logger.info(f"length: {len(new_contents)}")
-
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=100,
-        separators=["\n\n", "\n", ".", " ", ""],
-        length_function = len,
-    ) 
-    texts = text_splitter.split_text(new_contents) 
-    if texts:
-        logger.info(f"exts[0]: {texts[0]}")
-    
-    return texts
-
-fileId = uuid.uuid4().hex
-
-def _file_name_from_ref(file_ref: str) -> str:
-    """Extract a basename from a sharing URL or plain file name."""
-    raw = (file_ref or "").strip()
-    if not raw:
-        return ""
-    name = raw.rsplit("/", 1)[-1]
-    return parse.unquote(name)
-
-
-def get_summary_of_uploaded_file(file_ref, st=None, prompt=""):
-    """Analyze an uploaded file (by URL or name) and return a text summary.
-
-    Images are loaded from S3 under images/ and summarized with vision.
-    Documents keep the existing docs/ load path.
-    """
-    file_name = _file_name_from_ref(file_ref)
-    if not file_name:
-        return "파일 이름을 확인할 수 없습니다."
-
-    file_type = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
-    logger.info(f"get_summary_of_uploaded_file: file_name={file_name}, file_type={file_type}")
-
-    if file_type in ("png", "jpeg", "jpg", "webp", "gif"):
-        s3_client = boto3.client(
-            service_name="s3",
-            region_name=bedrock_region,
-        )
-        s3_key = f"{s3_image_prefix}/{file_name}"
-        logger.info(f"loading image from s3://{s3_bucket}/{s3_key}")
-        image_obj = s3_client.get_object(Bucket=s3_bucket, Key=s3_key)
-        image_content = image_obj["Body"].read()
-
-        image_summary_prompt = f"사용자의 요청을 참조하여 이미지의 내용을 분석한 후에 markdown 포맷으로 자세히 설명해주세요. 사용자 요청: <user_request>{prompt}</user_request>"
-        logger.info(f"image_summary_prompt: {image_summary_prompt}")
-
-        return summarize_image(image_content, image_summary_prompt)
-
-    msg = "지원하지 않는 파일 형식입니다."
-
-    if file_type == 'csv':
-        docs = load_csv_document(file_name)
-        contexts = []
-        for doc in docs:
-            contexts.append(doc.page_content)
-        logger.info(f"contexts: {contexts}")
-    
-        msg = get_summary(contexts)
-    
-    elif file_type == 'pdf' or file_type == 'txt' or file_type == 'md' or file_type == 'pptx' or file_type == 'docx':
-        texts = load_document(file_type, file_name)
-
-        if len(texts):
-            docs = []
-            for i in range(len(texts)):
-                docs.append(
-                    Document(
-                        page_content=texts[i],
-                        metadata={
-                            'name': file_name,
-                            # 'page':i+1,
-                            'url': path+'/'+doc_prefix+parse.quote(file_name)
-                        }
-                    )
-                )
-            logger.info(f"docs[0]: {docs[0]}") 
-            logger.info(f"docs size: {len(docs)}")
-
-            contexts = []
-            for doc in docs:
-                contexts.append(doc.page_content)
-            logger.info(f"contexts: {contexts}")
-
-            msg = get_summary(contexts)
-        else:
-            msg = "문서 로딩에 실패하였습니다."        
-
-    global fileId
-    fileId = uuid.uuid4().hex
-
-    return msg
-
-# load csv documents from s3
-def load_csv_document(s3_file_name):
-    # Set AWS credentials
-    aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-    aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-    aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-    
-    if aws_access_key and aws_secret_key:
-        s3r = boto3.resource(
-            service_name='s3',
-            region_name=bedrock_region,
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            aws_session_token=aws_session_token
-        )
-    else:
-        s3r = boto3.resource(
-            service_name='s3',
-            region_name=bedrock_region
-        )
-    doc = s3r.Object(s3_bucket, s3_prefix+'/'+s3_file_name)
-
-    lines = doc.get()['Body'].read().decode('utf-8').split('\n')   # read csv per line
-    logger.info(f"lins: {len(lines)}")
-        
-    columns = lines[0].split(',')  # get columns
-    #columns = ["Category", "Information"]  
-    #columns_to_metadata = ["type","Source"]
-    logger.info(f"columns: {columns}")
-    
-    docs = []
-    n = 0
-    for row in csv.DictReader(lines, delimiter=',',quotechar='"'):
-        #to_metadata = {col: row[col] for col in columns_to_metadata if col in row}
-        values = {k: row[k] for k in columns if k in row}
-        content = "\n".join(f"{k.strip()}: {v.strip()}" for k, v in values.items())
-        doc = Document(
-            page_content=content,
-            metadata={
-                'name': s3_file_name,
-                'row': n+1,
-            }
-            #metadata=to_metadata
-        )
-        docs.append(doc)
-        n = n+1
-    logger.info(f"docs[0]: {docs[0]}")
-
-    return docs
-
-config = utils.load_config()
-
-bedrock_region = config["region"] if "region" in config else "us-west-2"
-projectName = config["projectName"] if "projectName" in config else "mcp-rag"
-accountId = config["accountId"] if "accountId" in config else None
-
-s3_prefix = 'docs'
-s3_image_prefix = 'images'
-
-s3_bucket = config["s3_bucket"] if "s3_bucket" in config else None
-
-path = config["sharing_url"] if "sharing_url" in config else None
-
-def upload_to_s3(file_bytes, file_name):
-    """
-    Upload a file to S3 and return the URL
-    """
-    try:
-        # Set AWS credentials
-        aws_access_key = os.environ.get('AWS_ACCESS_KEY_ID')
-        aws_secret_key = os.environ.get('AWS_SECRET_ACCESS_KEY')
-        aws_session_token = os.environ.get('AWS_SESSION_TOKEN')
-        
-        if aws_access_key and aws_secret_key:
-            s3_client = boto3.client(
-                service_name='s3',
-                region_name=bedrock_region,
-                aws_access_key_id=aws_access_key,
-                aws_secret_access_key=aws_secret_key,
-                aws_session_token=aws_session_token
-            )
-        else:
-            s3_client = boto3.client(
-                service_name='s3',
-                region_name=bedrock_region
-            )
-        # Generate a unique file name to avoid collisions
-        #timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        #unique_id = str(uuid.uuid4())[:8]
-        #s3_key = f"uploaded_images/{timestamp}_{unique_id}_{file_name}"
-
-        content_type = utils.get_contents_type(file_name)       
-        logger.info(f"content_type: {content_type}") 
-
-        if content_type == "image/jpeg" or content_type == "image/png":
-            s3_key = f"{s3_image_prefix}/{file_name}"
-        else:
-            s3_key = f"{s3_prefix}/{file_name}"
-        
-        user_meta = {  # user-defined metadata
-            "content_type": content_type,
-            "model_name": model_name
-        }
-        
-        response = s3_client.put_object(
-            Bucket=s3_bucket, 
-            Key=s3_key, 
-            ContentType=content_type,
-            Metadata = user_meta,
-            Body=file_bytes            
-        )
-        logger.info(f"upload response: {response}")
-
-        if content_type == "image/jpeg" or content_type == "image/png":
-            url = path + "/" + s3_image_prefix + "/" + parse.quote(file_name)
-        else:
-            url = path + "/" + s3_prefix + "/" + parse.quote(file_name)
-        return url
-    
-    except Exception as e:
-        err_msg = f"Error uploading to S3: {str(e)}"
-        logger.info(f"{err_msg}")
-        return None
-
-def upload_to_s3_artifacts(file_bytes, file_name):
-    """
-    Upload a file to S3 and return the URL
-    """
-    try:
-        if aws_access_key and aws_secret_key:
-            s3_client = boto3.client(
-                service_name='s3',
-                region_name=bedrock_region,
-                aws_access_key_id=aws_access_key,
-                aws_secret_access_key=aws_secret_key,
-                aws_session_token=aws_session_token
-            )
-        else:
-            s3_client = boto3.client(
-                service_name='s3',
-                region_name=bedrock_region
-        )
-
-        content_type = utils.get_contents_type(file_name)       
-        logger.info(f"content_type: {content_type}") 
-
-        s3_key = f"artifacts/{file_name}"
-        
-        user_meta = {  # user-defined metadata
-            "content_type": content_type,
-            "model_name": model_name
-        }
-        
-        response = s3_client.put_object(
-            Bucket=s3_bucket, 
-            Key=s3_key, 
-            ContentType=content_type,
-            Metadata = user_meta,
-            Body=file_bytes            
-        )
-        logger.info(f"upload response: {response}")
-
-        url = path+'/artifacts/'+parse.quote(file_name)
-        return url
-    
-    except Exception as e:
-        err_msg = f"Error uploading to S3: {str(e)}"
-        logger.info(f"{err_msg}")
-        return None
 
 def add_notification(notification_queue, message):
     if notification_queue is not None:
         notification_queue.notify(message)
 
+
 def update_streaming_result(notification_queue, message):
     if notification_queue is not None:
         notification_queue.stream(message)
+
 
 def update_tool_notification(notification_queue, tool_use_id, message):
     if notification_queue is not None:
         notification_queue.tool_update(tool_use_id, message)
 
+
 def update_rag_result(notification_queue, message):
     if notification_queue is not None:
         notification_queue.stream(message)
+
 
 ####################### boto3 #######################
 # General Conversation
 #########################################################
 def general_conversation(query):
+    """Entry point: stream a general (non-agentic) conversation turn.
+
+    Thin wrapper; the actual conversation orchestration lives in
+    _run_general_conversation so the entry point stays free of business logic.
+    """
+    return _run_general_conversation(query)
+
+
+def _run_general_conversation(query):
     global memory_chain
 
     if memory_chain is None:
@@ -909,77 +482,75 @@ def general_conversation(query):
 
     system_prompt = (
         "당신의 이름은 서연이고, 질문에 대해 친절하게 답변하는 사려깊은 인공지능 도우미입니다."
-        "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다." 
+        "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다."
         "모르는 질문을 받으면 솔직히 모른다고 말합니다."
     )
-    
+
     bedrock_client = boto3.client(
-        service_name='bedrock-runtime',
+        service_name="bedrock-runtime",
         region_name=bedrock_region,
-        config=Config(
-            retries = {
-                'max_attempts': 30
-            }
-        )
+        config=Config(retries={"max_attempts": 30}),
     )
-    
+
     # Process conversation history
     messages = []
-    if memory_chain and hasattr(memory_chain, 'load_memory_variables'):
+    if memory_chain and hasattr(memory_chain, "load_memory_variables"):
         history = memory_chain.load_memory_variables({})["chat_history"]
         # Convert langchain messages to boto3 format
         for msg in history:
-            if hasattr(msg, 'content'):
-                if msg.__class__.__name__ == 'HumanMessage':
+            if hasattr(msg, "content"):
+                if msg.__class__.__name__ == "HumanMessage":
                     messages.append({"role": "user", "content": msg.content})
-                elif msg.__class__.__name__ == 'AIMessage':
+                elif msg.__class__.__name__ == "AIMessage":
                     messages.append({"role": "assistant", "content": msg.content})
         # Bedrock Converse API requirement: first message must be from user
         if messages and messages[0]["role"] == "assistant":
             messages = messages[1:]
-    
+
     # Add current question
     messages.append({"role": "user", "content": f"Question: {query}"})
-    
+
     # Set model parameters
-    if model_type == 'claude':
+    if model_type == "claude":
         maxOutputTokens = get_max_output_tokens(model_id)
         STOP_SEQUENCE = "\n\nHuman:"
     else:
         maxOutputTokens = 5120
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
-    
-    if reasoning_mode == 'Enable' and not uses_adaptive_thinking(model_id):
+
+    if reasoning_mode == "Enable" and not uses_adaptive_thinking(model_id):
         maxReasoningOutputTokens = 64000
-        thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
+        thinking_budget = min(
+            maxOutputTokens, maxReasoningOutputTokens - REASONING_TOKEN_BUFFER
+        )
         parameters = {
             "max_tokens": maxReasoningOutputTokens,
             "temperature": 1,
             "thinking": {
                 "type": "enabled",
-                "budget_tokens": thinking_budget
+                "budget_tokens": thinking_budget,
             },
-            "stop_sequences": [STOP_SEQUENCE]
+            "stop_sequences": [STOP_SEQUENCE],
         }
     else:
         parameters = {
             "max_tokens": maxOutputTokens,
-            "stop_sequences": [STOP_SEQUENCE]
+            "stop_sequences": [STOP_SEQUENCE],
         }
         if not is_fable_model(model_id) and not uses_adaptive_thinking(model_id):
             parameters["temperature"] = 0.1
             parameters["top_k"] = 250
-    
+
     def stream_generator():
         try:
-            if model_type == 'claude':
+            if model_type == "claude":
                 # Claude model format
                 request_body = {
                     "anthropic_version": "bedrock-2023-05-31",
                     "max_tokens": parameters["max_tokens"],
                     "stop_sequences": parameters.get("stop_sequences", []),
                     "system": system_prompt,
-                    "messages": messages
+                    "messages": messages,
                 }
                 if "temperature" in parameters:
                     request_body["temperature"] = parameters["temperature"]
@@ -987,7 +558,7 @@ def general_conversation(query):
                     request_body["top_k"] = parameters["top_k"]
                 if "top_p" in parameters:
                     request_body["top_p"] = parameters["top_p"]
-                
+
                 if "thinking" in parameters:
                     request_body["thinking"] = parameters["thinking"]
             else:
@@ -995,1046 +566,90 @@ def general_conversation(query):
                 request_body = {
                     "max_tokens": parameters["max_tokens"],
                     "system": system_prompt,
-                    "messages": messages
+                    "messages": messages,
                 }
                 if "temperature" in parameters:
                     request_body["temperature"] = parameters["temperature"]
-            
+
             # Call streaming response
             response = bedrock_client.invoke_model_with_response_stream(
-                modelId=model_id,
-                body=json.dumps(request_body)
+                modelId=model_id, body=json.dumps(request_body)
             )
-            
+
             full_content = ""
-            for event in response['body']:
-                chunk = json.loads(event['chunk']['bytes'].decode('utf-8'))
-                
-                if chunk.get('type') == 'content_block_delta':
-                    delta = chunk.get('delta', {})
-                    if delta.get('type') == 'text_delta':
-                        text = delta.get('text', '')
+            for event in response["body"]:
+                chunk = json.loads(event["chunk"]["bytes"].decode("utf-8"))
+
+                if chunk.get("type") == "content_block_delta":
+                    delta = chunk.get("delta", {})
+                    if delta.get("type") == "text_delta":
+                        text = delta.get("text", "")
                         full_content += text
                         yield text
-                elif chunk.get('type') == 'message_delta':
+                elif chunk.get("type") == "message_delta":
                     # Message complete
                     pass
-                elif chunk.get('type') == 'message_stop':
+                elif chunk.get("type") == "message_stop":
                     # Streaming ended
                     pass
-            
+
             # Process <reasoning> tag
-            if '<reasoning>' in full_content and '</reasoning>' in full_content:
-                reasoning_start = full_content.find('<reasoning>') + 11
-                reasoning_end = full_content.find('</reasoning>')
+            if "<reasoning>" in full_content and "</reasoning>" in full_content:
+                reasoning_start = full_content.find("<reasoning>") + 11
+                reasoning_end = full_content.find("</reasoning>")
                 reasoning_content = full_content[reasoning_start:reasoning_end]
-                st.info(f"{reasoning_content}")
-            
+                logger.info("reasoning_content: %s", reasoning_content)
+
             logger.info(f"full_content: {full_content}")
-                
+
         except Exception:
-            err_msg = traceback.format_exc()
-            logger.info(f"error message: {err_msg}")      
-            raise Exception ("Not able to request to LLM: "+err_msg)
-    
+            logger.exception("Not able to request to LLM")
+            raise Exception("Unable to process request")
+
     return stream_generator()
 
-number_of_results = 4
 
-def retrieve(query):
-    global knowledge_base_id
-
-    bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime",
-        region_name=bedrock_region
-    )
-    
-    try:
-        response = bedrock_agent_runtime_client.retrieve(
-            retrievalQuery={"text": query},
-            knowledgeBaseId=knowledge_base_id,
-                retrievalConfiguration={
-                    "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                },
-            )
-    except ClientError as e:
-        error_code = e.response.get("Error", {}).get("Code", "")
-        
-        # Update knowledge_base_id only when ResourceNotFoundException occurs
-        if error_code == "ResourceNotFoundException":
-            logger.warning(f"ResourceNotFoundException occurred: {e}")
-            logger.info("Attempting to update knowledge_base_id...")
-            
-            bedrock_agent_client = boto3.client("bedrock-agent", region_name=bedrock_region)
-            knowledge_base_list = bedrock_agent_client.list_knowledge_bases()
-            
-            updated = False
-            for knowledge_base in knowledge_base_list.get("knowledgeBaseSummaries", []):
-                if knowledge_base["name"] == projectName:
-                    new_knowledge_base_id = knowledge_base["knowledgeBaseId"]
-                    knowledge_base_id = new_knowledge_base_id
-
-                    config['knowledge_base_id'] = new_knowledge_base_id
-                    with open(config_path, "w", encoding="utf-8") as f:
-                        json.dump(config, f, ensure_ascii=False, indent=4)
-                    
-                    logger.info(f"Updated knowledge_base_id to: {new_knowledge_base_id}")
-                    updated = True
-                    break
-            
-            if updated:
-                # Retry after updating knowledge_base_id
-                try:
-                    response = bedrock_agent_runtime_client.retrieve(
-                        retrievalQuery={"text": query},
-                        knowledgeBaseId=knowledge_base_id,
-                        retrievalConfiguration={
-                            "vectorSearchConfiguration": {"numberOfResults": number_of_results},
-                        },
-                    )
-                    logger.info("Retry successful after updating knowledge_base_id")
-                except Exception as retry_error:
-                    logger.error(f"Retry failed after updating knowledge_base_id: {retry_error}")
-                    raise
-            else:
-                logger.error(f"Could not find knowledge base with name: {projectName}")
-                raise
-        else:
-            # Re-raise other errors that are not ResourceNotFoundException
-            logger.error(f"Error retrieving: {e}")
-            raise
-    except Exception as e:
-        # Re-raise other exceptions that are not ClientError
-        logger.error(f"Unexpected error retrieving: {e}")
-        raise
-    
-    # logger.info(f"response: {response}")
-    retrieval_results = response.get("retrievalResults", [])
-    # logger.info(f"retrieval_results: {retrieval_results}")
-
-    json_docs = []
-    for result in retrieval_results:
-        text = url = name = None
-        if "content" in result:
-            content = result["content"]
-            if "text" in content:
-                text = content["text"]
-
-        if "location" in result:
-            location = result["location"]
-            if "s3Location" in location:
-                uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""
-                
-                name = uri.split("/")[-1]
-                encoded_name = parse.quote(name)                
-                url = f"{path}/{doc_prefix}{encoded_name}"
-                
-            elif "webLocation" in location:
-                url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
-                name = "WEB"
-
-        page = None
-        raw_page = (result.get("metadata") or {}).get("x-amz-bedrock-kb-document-page-number")
-        if raw_page is not None:
-            try:
-                # Bedrock KB uses 0-based page numbers; convert to 1-based for display
-                page = int(raw_page) + 1
-            except (TypeError, ValueError):
-                page = raw_page
-
-        reference = {
-            "url": url,
-            "title": name,
-            "from": "RAG",
-        }
-        if page is not None:
-            reference["page"] = page
-
-        json_docs.append({
-            "contents": text,
-            "reference": reference,
-        })
-    logger.info(f"json_docs: {json_docs}")
-
-    return json.dumps(json_docs, ensure_ascii=False)
-
-def run_rag_with_knowledge_base(query, st):
-    global reference_docs, contentList
-    reference_docs = []
-    contentList = []
-
-    # retrieve
-    if debug_mode == "Enable":
-        st.info(f"RAG 검색을 수행합니다. 검색어: {query}")  
-
-    json_docs = retrieve(query)    
-    logger.info(f"json_docs: {json_docs}")
-
-    relevant_docs = json.loads(json_docs)
-
-    relevant_context = ""
-    for doc in relevant_docs:
-        relevant_context += f"{doc['contents']}\n\n"
-
-    # change format to document
-    st.info(f"{len(relevant_docs)}개의 관련된 문서를 얻었습니다.")
-
-    if "fable" in model_id.lower():
-        bedrock_data_retention.ensure_fable_data_retention(
-            model_id,
-            bedrock_region=bedrock_region,
-        )
-
-    # Create bedrock client
-    bedrock_client = boto3.client(
-        service_name='bedrock-runtime',
-        region_name=bedrock_region,
-        config=Config(
-            retries = {
-                'max_attempts': 30
-            }
-        )
-    )
-    
-    # Configure RAG prompt
-    if isKorean(query):
-        system_prompt = (
-            "다음의 컨텍스트를 사용하여 질문에 답변하세요. "
-            "컨텍스트에 정보가 없으면 모른다고 답변하세요. "
-            "답변은 <result> 태그 안에 작성하세요."
-        )
-        user_message = f"Question: {query}\n\nContext:\n{relevant_context}"
-    else:
-        system_prompt = (
-            "Answer the question using the following context. "
-            "If you don't know the answer based on the context, say you don't know. "
-            "Put your answer in <result> tags."
-        )
-        user_message = f"Question: {query}\n\nContext:\n{relevant_context}"
-    
-    # Set model parameters
-    if model_type == 'claude':
-        maxOutputTokens = get_max_output_tokens(model_id)
-        STOP_SEQUENCE = "\n\nHuman:"
-    else:
-        maxOutputTokens = 5120
-        STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
-    
-    if reasoning_mode == 'Enable' and not uses_adaptive_thinking(model_id):
-        maxReasoningOutputTokens = 64000
-        thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
-        parameters = {
-            "max_tokens": maxReasoningOutputTokens,
-            "temperature": 1,
-            "thinking": {
-                "type": "enabled",
-                "budget_tokens": thinking_budget
-            },
-            "stop_sequences": [STOP_SEQUENCE]
-        }
-    else:
-        parameters = {
-            "max_tokens": maxOutputTokens,
-            "stop_sequences": [STOP_SEQUENCE]
-        }
-        if not is_fable_model(model_id) and not uses_adaptive_thinking(model_id):
-            parameters["temperature"] = 0.1
-            parameters["top_k"] = 250
-            parameters["top_p"] = 0.9
-    
-    # Call Bedrock API
-    msg = ""    
-    try:
-        if model_type == 'claude':
-            # Claude model format
-            request_body = {
-                "anthropic_version": "bedrock-2023-05-31",
-                "max_tokens": parameters["max_tokens"],
-                "stop_sequences": parameters.get("stop_sequences", []),
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": user_message
-                    }
-                ]
-            }
-            if "temperature" in parameters:
-                request_body["temperature"] = parameters["temperature"]
-            if "top_k" in parameters:
-                request_body["top_k"] = parameters["top_k"]
-            if "top_p" in parameters:
-                request_body["top_p"] = parameters["top_p"]
-            
-            if "thinking" in parameters:
-                request_body["thinking"] = parameters["thinking"]
-        else:
-            # Other model format (modify if needed)
-            request_body = {
-                "max_tokens": parameters["max_tokens"],
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": user_message
-                    }
-                ]
-            }
-            if "temperature" in parameters:
-                request_body["temperature"] = parameters["temperature"]
-        
-        response = bedrock_client.invoke_model(
-            modelId=model_id,
-            body=json.dumps(request_body)
-        )
-        
-        response_body = json.loads(response['body'].read())
-        logger.info(f"response_body: {response_body}")
-        
-        # Extract text from response
-        if model_type == 'claude':
-            if 'content' in response_body:
-                content = response_body['content']
-                if isinstance(content, list) and len(content) > 0:
-                    msg = content[0].get('text', '')
-                else:
-                    msg = str(content)
-            else:
-                msg = str(response_body)
-        else:
-            # Handle other model formats (modify if needed)
-            msg = response_body.get('outputs', [{}])[0].get('text', '') if 'outputs' in response_body else str(response_body)
-        
-        logger.info(f"result: {msg}")
-        
-        # Extract content from <result> tag
-        if msg.find('<result>') != -1:
-            msg = msg[msg.find('<result>')+8:msg.find('</result>')]
-               
-    except Exception:
-        err_msg = traceback.format_exc()
-        logger.info(f"error message: {err_msg}")                    
-        raise Exception ("Not able to request to LLM")
-    
-    if relevant_docs:
-        refs = []
-        for doc in relevant_docs:
-            ref = {
-                "title": doc["reference"]["title"],
-                "url": doc["reference"]["url"],
-                "content": doc["contents"],
-            }
-            if doc["reference"].get("page") is not None:
-                ref["page"] = doc["reference"]["page"]
-            refs.append(ref)
-        msg += _format_references_markdown(refs)
-    
-    return msg
-
-def run_rag_using_retrieve_and_generate(query, notification_queue):
-    msg = None
-
-    global reference_docs, contentList
-    reference_docs = []
-    contentList = []
-
-    # retrieve
-    if debug_mode == "Enable":
-        add_notification(notification_queue, f"RAG 검색을 수행합니다. 검색어: {query}")  
-
-    bedrock_agent_runtime_client = boto3.client(
-        "bedrock-agent-runtime",
-        region_name=bedrock_region
-    )
-
-    model_arn = f"arn:aws:bedrock:{region}:{account_id}:inference-profile/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
-    
-    retrieve_response = bedrock_agent_runtime_client.retrieve_and_generate_stream(
-        input={"text": query},
-        retrieveAndGenerateConfiguration={
-            "knowledgeBaseConfiguration": {
-                "knowledgeBaseId": knowledge_base_id,
-                "modelArn": model_arn,
-                "retrievalConfiguration": {
-                    "vectorSearchConfiguration": {
-                        "numberOfResults": number_of_results
-                    }
-                }
-            },
-            "type": "KNOWLEDGE_BASE"
-        }        
-    )
-    logger.info(f"retrieve_response type: {type(retrieve_response)}")
-
-    msg = ""
-    for event in retrieve_response['stream']:
-        if "output" in event:
-            text = event['output']['text']
-            logger.info(f"text: {text}")
-            msg += text
-
-            update_rag_result(notification_queue, msg)
-
-        if "citation" in event:
-            citation = event['citation']
-            logger.info(f"citation: {citation}")
-
-            retrieved_references = citation.get('citation', {}).get('retrievedReferences', []) or citation.get('retrievedReferences', [])
-                        
-            for ref in retrieved_references:
-                content_text = url = name = ""
-
-                if "content" in ref:
-                    content_text = ref["content"]["text"]
-
-                if "location" in ref:
-                    location = ref["location"]
-                    if "s3Location" in location:
-                        uri = location["s3Location"]["uri"] if location["s3Location"]["uri"] is not None else ""
-                        
-                        name = uri.split("/")[-1]
-                        encoded_name = parse.quote(name)                
-                        url = f"{path}/{doc_prefix}{encoded_name}"
-                    
-                    if "webLocation" in location:
-                        url = location["webLocation"]["url"] if location["webLocation"]["url"] is not None else ""
-                        name = "WEB"
-
-                reference_doc = {
-                    "contents": content_text,              
-                    "reference": {
-                        "url": url,                   
-                        "title": name,
-                        "from": "RAG"
-                    }
-                }
-                                
-                # duplicate check and add to reference_docs
-                if reference_doc not in reference_docs:
-                    reference_docs.append(reference_doc)
-                    # add_notification(notification_queue, f"{content_text}\n\n{url}")
-
-    if reference_docs:
-        refs = [
-            {
-                "title": doc["reference"]["title"],
-                "url": doc["reference"]["url"],
-                "content": doc["contents"],
-            }
-            for doc in reference_docs
-        ]
-        msg += _format_references_markdown(refs)
-
-    update_rag_result(notification_queue, msg)
-
-    return msg
-
-sharing_url = config["sharing_url"] if "sharing_url" in config else None
-s3_prefix = "docs"
-capture_prefix = "captures"
-
-def _sanitize_reference_text(text: str, max_len: int) -> str:
-    """Collapse whitespace/newlines and strip markdown that breaks list links."""
-    if not text:
-        return ""
-    cleaned = " ".join(str(text).replace("\r", "\n").split())
-    cleaned = cleaned.replace("```", "`").replace("[", "\\[").replace("]", "\\]")
-    if len(cleaned) > max_len:
-        cleaned = cleaned[: max_len - 3].rstrip(" .") + "..."
-    return cleaned
-
-
-def _format_references_markdown(references: list) -> str:
-    """Build a Reference section safe for markdown list rendering."""
-    lines = ["\n\n### Reference"]
-    for i, reference in enumerate(references, start=1):
-        title = _sanitize_reference_text(reference.get("title") or "Untitled", 120)
-        content = _sanitize_reference_text(reference.get("content") or "", 100)
-        url = (reference.get("url") or "").strip()
-        page = reference.get("page")
-        page_suffix = f" , {page} page" if page is not None else ""
-        if url:
-            lines.append(
-                f"{i}. [{title}]({url}){page_suffix} — {content}" if content
-                else f"{i}. [{title}]({url}){page_suffix}"
-            )
-        else:
-            lines.append(
-                f"{i}. {title}{page_suffix} — {content}" if content
-                else f"{i}. {title}{page_suffix}"
-            )
-    return "\n".join(lines) + "\n"
-
-
-
-
-def _build_tool_reference(ref_item: dict) -> dict:
-    """Build a display reference from a RAG doc item."""
-    reference = ref_item.get("reference") or {}
-    contents = ref_item.get("contents") or ""
-    content_text = contents[:100] + "..." if len(contents) > 100 else contents
-    result = {
-        "url": reference.get("url"),
-        "title": reference.get("title"),
-        "content": content_text,
-    }
-    if reference.get("page") is not None:
-        result["page"] = reference["page"]
-    return result
-
-
-
-def _extract_rag_references_from_payload(json_data) -> list:
-    """Extract RAG {contents, reference} items from MCP tool payloads."""
-    refs = []
-    if isinstance(json_data, dict):
-        if "reference" in json_data and "contents" in json_data:
-            refs.append(_build_tool_reference(json_data))
-            return refs
-        for value in json_data.values():
-            if isinstance(value, dict) and "reference" in value and "contents" in value:
-                refs.append(_build_tool_reference(value))
-        return refs
-
-    if not isinstance(json_data, list):
-        return refs
-
-    for item in json_data:
-        if not isinstance(item, dict):
-            continue
-        if "text" in item and ("type" not in item or item.get("type") == "text"):
-            text_val = item.get("text")
-            if isinstance(text_val, str):
-                try:
-                    text_json = json.loads(text_val)
-                except (json.JSONDecodeError, TypeError):
-                    continue
-                refs.extend(_extract_rag_references_from_payload(text_json))
-            continue
-        if "reference" in item and "contents" in item:
-            refs.append(_build_tool_reference(item))
-    return refs
-
-
-def get_tool_info(tool_name, tool_content):
-    tool_references = []    
-    urls = []
-    content = ""
-
-    # tavily
-    if isinstance(tool_content, str) and "Title:" in tool_content and "URL:" in tool_content and "Content:" in tool_content:
-        logger.info("Tavily parsing...")
-        items = tool_content.split("\n\n")
-        for i, item in enumerate(items):
-            # logger.info(f"item[{i}]: {item}")
-            if "Title:" in item and "URL:" in item and "Content:" in item:
-                try:
-                    title_part = item.split("Title:")[1].split("URL:")[0].strip()
-                    url_part = item.split("URL:")[1].split("Content:")[0].strip()
-                    content_part = item.split("Content:")[1].strip().replace("\n", "")
-                    
-                    logger.info(f"title_part: {title_part}")
-                    logger.info(f"url_part: {url_part}")
-                    logger.info(f"content_part: {content_part}")
-
-                    content += f"{content_part}\n\n"
-                    
-                    tool_references.append({
-                        "url": url_part,
-                        "title": title_part,
-                        "content": content_part[:100] + "..." if len(content_part) > 100 else content_part
-                    })
-                except Exception as e:
-                    logger.info(f"Parsing error: {str(e)}")
-                    continue                
-
-    # OpenSearch
-    elif tool_name == "SearchIndexTool": 
-        if ":" in tool_content:
-            extracted_json_data = tool_content.split(":", 1)[1].strip()
-            try:
-                json_data = json.loads(extracted_json_data)
-                # logger.info(f"extracted_json_data: {extracted_json_data[:200]}")
-            except json.JSONDecodeError:
-                logger.info("JSON parsing error")
-                json_data = {}
-        else:
-            json_data = {}
-        
-        if "hits" in json_data:
-            hits = json_data["hits"]["hits"]
-            if hits:
-                logger.info(f"hits[0]: {hits[0]}")
-
-            for hit in hits:
-                text = hit["_source"]["text"]
-                metadata = hit["_source"]["metadata"]
-                
-                content += f"{text}\n\n"
-
-                filename = metadata["name"].split("/")[-1]
-                # logger.info(f"filename: {filename}")
-                
-                content_part = text.replace("\n", "")
-                tool_references.append({
-                    "url": metadata["url"], 
-                    "title": filename,
-                    "content": content_part[:100] + "..." if len(content_part) > 100 else content_part
-                })
-                
-        logger.info(f"content: {content}")
-        
-    # Knowledge Base
-    elif tool_name == "QueryKnowledgeBases": 
-        try:
-            # Handle case where tool_content contains multiple JSON objects
-            if tool_content.strip().startswith('{'):
-                # Parse each JSON object individually
-                json_objects = []
-                current_pos = 0
-                brace_count = 0
-                start_pos = -1
-                
-                for i, char in enumerate(tool_content):
-                    if char == '{':
-                        if brace_count == 0:
-                            start_pos = i
-                        brace_count += 1
-                    elif char == '}':
-                        brace_count -= 1
-                        if brace_count == 0 and start_pos != -1:
-                            try:
-                                json_obj = json.loads(tool_content[start_pos:i+1])
-                                # logger.info(f"json_obj: {json_obj}")
-                                json_objects.append(json_obj)
-                            except json.JSONDecodeError:
-                                logger.info(f"JSON parsing error: {tool_content[start_pos:i+1][:100]}")
-                            start_pos = -1
-                
-                json_data = json_objects
-            else:
-                # Try original method
-                json_data = json.loads(tool_content)                
-            # logger.info(f"json_data: {json_data}")
-
-            # Build content
-            if isinstance(json_data, list):
-                for item in json_data:
-                    if isinstance(item, dict) and "content" in item:
-                        content_text = item["content"].get("text", "")
-                        content += content_text + "\n\n"
-
-                        uri = "" 
-                        if "location" in item:
-                            if "s3Location" in item["location"]:
-                                uri = item["location"]["s3Location"]["uri"]
-                                # logger.info(f"uri (list): {uri}")
-                                ext = uri.split(".")[-1]
-
-                                # if ext is an image 
-                                url = sharing_url + "/" + s3_prefix + "/" + uri.split("/")[-1]
-                                if ext in ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "ico", "webp"]:
-                                    url = sharing_url + "/" + capture_prefix + "/" + uri.split("/")[-1]
-                                logger.info(f"url: {url}")
-                                
-                                tool_references.append({
-                                    "url": url, 
-                                    "title": uri.split("/")[-1],
-                                    "content": content_text[:100] + "..." if len(content_text) > 100 else content_text
-                                })          
-                
-        except json.JSONDecodeError as e:
-            logger.info(f"JSON parsing error: {e}")
-            json_data = {}
-            content = tool_content  # Use original content if parsing fails
-
-        logger.info(f"content: {content}")
-        logger.info(f"tool_references: {tool_references}")
-
-    # aws document
-    elif tool_name == "search_documentation":
-        try:
-            # Handle case where tool_content is a list (e.g., [{'type': 'text', 'text': '...'}])
-            if isinstance(tool_content, list):
-                # Extract text field from the first item in the list
-                if len(tool_content) > 0 and isinstance(tool_content[0], dict) and 'text' in tool_content[0]:
-                    tool_content = tool_content[0]['text']
-                else:
-                    logger.info(f"Unexpected list format: {tool_content}")
-                    return content, urls, tool_references
-            
-            # Parse JSON if tool_content is a string
-            if isinstance(tool_content, str):
-                json_data = json.loads(tool_content)
-            elif isinstance(tool_content, dict):
-                json_data = tool_content
-            else:
-                logger.info(f"Unexpected tool_content type: {type(tool_content)}")
-                return content, urls, tool_references
-            
-            # Extract results from search_results array
-            search_results = json_data.get('search_results', [])
-            if not search_results:
-                # If search_results is not found, json_data itself may be an array
-                if isinstance(json_data, list):
-                    search_results = json_data
-                else:
-                    logger.info(f"No search_results found in JSON data")
-                    return content, urls, tool_references
-            
-            for item in search_results:
-                logger.info(f"item: {item}")
-                
-                if isinstance(item, str):
-                    try:
-                        item = json.loads(item)
-                    except json.JSONDecodeError:
-                        logger.info(f"Failed to parse item as JSON: {item}")
-                        continue
-                
-                if isinstance(item, dict) and 'url' in item and 'title' in item:
-                    url = item['url']
-                    title = item['title']
-                    content_text = item.get('context', '')[:100] + "..." if len(item.get('context', '')) > 100 else item.get('context', '')
-                    tool_references.append({
-                        "url": url,
-                        "title": title,
-                        "content": content_text
-                    })
-                else:
-                    logger.info(f"Invalid item format: {item}")
-                    
-        except json.JSONDecodeError as e:
-            logger.info(f"JSON parsing error: {e}, tool_content: {tool_content}")
-            pass
-        except Exception as e:
-            logger.info(f"Unexpected error in search_documentation: {e}, tool_content type: {type(tool_content)}")
-            pass
-
-        logger.info(f"content: {content}")
-        logger.info(f"tool_references: {tool_references}")
-            
-    # ArXiv
-    elif tool_name == "search_papers" and "papers" in tool_content:
-        try:
-            json_data = json.loads(tool_content)
-
-            papers = json_data['papers']
-            for paper in papers:
-                url = paper['url']
-                title = paper['title']
-                abstract = paper['abstract'].replace("\n", "")
-                content_text = abstract[:100] + "..." if len(abstract) > 100 else abstract
-                content += f"{content_text}\n\n"
-                logger.info(f"url: {url}, title: {title}, content: {content_text}")
-
-                tool_references.append({
-                    "url": url,
-                    "title": title,
-                    "content": content_text
-                })
-        except json.JSONDecodeError:
-            logger.info(f"JSON parsing error: {tool_content}")
-            pass
-
-        logger.info(f"content: {content}")
-        logger.info(f"tool_references: {tool_references}")
-
-    # aws-knowledge
-    elif tool_name == "aws___read_documentation":
-        logger.info(f"#### {tool_name} ####")
-        if isinstance(tool_content, dict):
-            json_data = tool_content
-        elif isinstance(tool_content, list):
-            json_data = tool_content
-        else:
-            json_data = json.loads(tool_content)
-        
-        logger.info(f"json_data: {json_data}")
-
-        if "content" in json_data:
-            content = json_data["content"]
-            logger.info(f"content: {content}")
-            if "result" in content:
-                result = content["result"]
-                logger.info(f"result: {result}")
-                
-        payload = {}
-        if "response" in json_data:
-            payload = json_data["response"]["payload"]
-        elif "content" in json_data:
-            payload = json_data
-
-        if "content" in payload:
-            payload_content = payload["content"]
-            if "result" in payload_content:
-                result = payload_content["result"]
-                logger.info(f"result: {result}")
-                if isinstance(result, str) and "AWS Documentation from" in result:
-                    logger.info(f"Processing AWS Documentation format: {result}")
-                    try:
-                        # Extract URL from "AWS Documentation from https://..."
-                        url_start = result.find("https://")
-                        if url_start != -1:
-                            # Find the colon after the URL (not inside the URL)
-                            url_end = result.find(":", url_start)
-                            if url_end != -1:
-                                # Check if the colon is part of the URL or the separator
-                                url_part = result[url_start:url_end]
-                                # If the colon is immediately after the URL, use it as separator
-                                if result[url_end:url_end+2] == ":\n":
-                                    url = url_part
-                                    content_start = url_end + 2  # Skip the colon and newline
-                                else:
-                                    # Try to find the actual URL end by looking for space or newline
-                                    space_pos = result.find(" ", url_start)
-                                    newline_pos = result.find("\n", url_start)
-                                    if space_pos != -1 and newline_pos != -1:
-                                        url_end = min(space_pos, newline_pos)
-                                    elif space_pos != -1:
-                                        url_end = space_pos
-                                    elif newline_pos != -1:
-                                        url_end = newline_pos
-                                    else:
-                                        url_end = len(result)
-                                    
-                                    url = result[url_start:url_end]
-                                    content_start = url_end + 1
-                                
-                                # Remove trailing colon from URL if present
-                                if url.endswith(":"):
-                                    url = url[:-1]
-                                
-                                # Extract content after the URL
-                                if content_start < len(result):
-                                    content_text = result[content_start:].strip()
-                                    # Truncate content for display
-                                    display_content = content_text[:100] + "..." if len(content_text) > 100 else content_text
-                                    display_content = display_content.replace("\n", "")
-                                    
-                                    tool_references.append({
-                                        "url": url,
-                                        "title": "AWS Documentation",
-                                        "content": display_content
-                                    })
-                                    content += content_text + "\n\n"
-                                    logger.info(f"Extracted URL: {url}")
-                                    logger.info(f"Extracted content length: {len(content_text)}")
-                    except Exception as e:
-                        logger.error(f"Error parsing AWS Documentation format: {e}")
-        logger.info(f"content: {content}")
-        logger.info(f"tool_references: {tool_references}")
-
-    else:        
-        try:
-            if isinstance(tool_content, dict):
-                json_data = tool_content
-            elif isinstance(tool_content, list):
-                json_data = tool_content
-            else:
-                json_data = json.loads(tool_content)
-            
-            logger.info(f"json_data: {json_data}")
-            if isinstance(json_data, dict) and "path" in json_data:  # path
-                path = json_data["path"]
-                if isinstance(path, list):
-                    for url in path:
-                        urls.append(url)
-                else:
-                    urls.append(path)            
-
-            # RAG retrieve returns MCP blocks: [{"type":"text","text":"[{contents,reference}...]"}]
-            extracted = _extract_rag_references_from_payload(json_data)
-            tool_references.extend(extracted)
-                
-            logger.info(f"tool_references: {tool_references}")
-
-        except json.JSONDecodeError:
-            pass
-
-    return content, urls, tool_references
-
-
-def _resize_and_encode(image_content):
-    """Resize image if needed and return base64-encoded string."""
-    img = Image.open(BytesIO(image_content))
-    width, height = img.size
-    logger.info(f"width: {width}, height: {height}, size: {width*height}")
-
-    isResized = False
-    max_size = 5 * 1024 * 1024  # 5MB
-
-    while width * height > 2000000:
-        width = int(width / 2)
-        height = int(height / 2)
-        isResized = True
-
-    if isResized:
-        img = img.resize((width, height))
-
-    max_attempts = 5
-    img_base64 = ""
-    base64_size = 0
-    for attempt in range(max_attempts):
-        buffer = BytesIO()
-        img.save(buffer, format="PNG", optimize=True)
-        img_bytes = buffer.getvalue()
-        img_base64 = base64.b64encode(img_bytes).decode("utf-8")
-
-        base64_size = len(img_base64.encode('utf-8'))
-        logger.info(f"attempt {attempt + 1}: base64_size = {base64_size} bytes")
-
-        if base64_size <= max_size:
-            break
-        width = int(width * 0.8)
-        height = int(height * 0.8)
-        img = img.resize((width, height))
-        logger.info(f"resizing to {width}x{height} due to size limit")
-
-    if base64_size > max_size:
-        raise Exception("이미지 크기가 너무 큽니다. 5MB 이하의 이미지를 사용해주세요.")
-
-    return img_base64
-
-
-def extract_text(img_base64):
-    """Extract text from an image using multimodal LLM."""
-    multimodal = get_chat(extended_thinking=reasoning_mode)
-    query = "텍스트를 추출해서 markdown 포맷으로 변환하세요. <result> tag를 붙여주세요."
-
-    messages = [
-        HumanMessage(
-            content=[
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_base64}",
-                    },
-                },
-                {"type": "text", "text": query},
-            ]
-        )
-    ]
-
-    extracted_text = ""
-    for attempt in range(5):
-        logger.info(f"extract_text attempt: {attempt}")
-        try:
-            result = multimodal.invoke(messages)
-            extracted_text = result.content
-            break
-        except Exception:
-            err_msg = traceback.format_exc()
-            logger.info(f"error message: {err_msg}")
-
-    logger.info(f"extracted_text: {extracted_text}")
-    if len(extracted_text) < 10:
-        extracted_text = "텍스트를 추출하지 못하였습니다."
-
-    return extracted_text
-
-
-def summary_image(img_base64, instruction):
-    """Summarize an image using multimodal LLM."""
-    llm = get_chat(extended_thinking=reasoning_mode)
-
-    if instruction:
-        logger.info(f"instruction: {instruction}")
-        query = f"{instruction}. <result> tag를 붙여주세요. 한국어로 답변하세요."
-    else:
-        query = "이미지가 의미하는 내용을 풀어서 자세히 알려주세요. markdown 포맷으로 답변을 작성합니다."
-
-    messages = [
-        HumanMessage(
-            content=[
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:image/png;base64,{img_base64}",
-                    },
-                },
-                {"type": "text", "text": query},
-            ]
-        )
-    ]
-
-    for attempt in range(5):
-        logger.info(f"summary_image attempt: {attempt}")
-        try:
-            result = llm.invoke(messages)
-            extracted_text = result.content
-            break
-        except Exception:
-            err_msg = traceback.format_exc()
-            logger.info(f"error message: {err_msg}")
-            raise Exception("Not able to request to LLM")
-
-    return extracted_text
-
-
-def summarize_image(image_content: bytes, prompt: str) -> str:
-    """Resize image and summarize with vision."""
-    img_base64 = _resize_and_encode(image_content)
-
-    logger.info("이미지의 내용을 분석합니다.")
-    result = summary_image(img_base64, prompt)
-
-    summary = result[result.find('<result>') + 8:result.find('</result>')]
-    logger.info(f"image summary: {summary}")
-
-    return summary
-
-
-#########################################################
-# AgentCore Memory
-#########################################################
-import agentcore_memory
-
-
-def initiate_memory():
-    """Load or create AgentCore Memory session variables for the current user."""
-    global memory_id, actor_id, session_id
-
-    effective_user_id = user_id if user_id and str(user_id).strip() else "default"
-    logger.info(f"initiate_memory for user_id: {effective_user_id}")
-
-    memory_id, actor_id, session_id, namespace = agentcore_memory.load_memory_variables(
-        effective_user_id
-    )
-    if not namespace:
-        namespace = f"/users/{actor_id}/preferences"
-    logger.info(
-        f"memory_id: {memory_id}, actor_id: {actor_id}, "
-        f"session_id: {session_id}, namespace: {namespace}"
-    )
-
-    if memory_id is None:
-        memory_id = agentcore_memory.retrieve_memory_id()
-        if memory_id is None:
-            logger.info("Memory will be created...")
-            memory_id = agentcore_memory.create_memory()
-            logger.info(f"Memory was created... {memory_id}")
-
-    agentcore_memory.create_strategy_if_not_exists(memory_id)
-
-
-def save_to_memory(query, result):
-    """Save conversation to AgentCore Memory when memory_enabled is True."""
-    global memory_id, actor_id, session_id
-
-    if not memory_enabled:
-        return
-
-    try:
-        expected_actor = agentcore_memory.resolve_memory_actor_id(
-            user_id if user_id and str(user_id).strip() else "default"
-        )
-        if memory_id is None or actor_id != expected_actor:
-            initiate_memory()
-
-        agentcore_memory.save_conversation_to_memory(
-            memory_id, actor_id, session_id, query, result
-        )
-        logger.info(f"Saved conversation to AgentCore Memory for actor_id={actor_id}")
-    except Exception as e:
-        logger.error(f"Failed to save conversation to AgentCore Memory: {e}")
+# ---------------------------------------------------------------------------
+# Re-exports from focused submodules (preserve `import chat; chat.X` API)
+# ---------------------------------------------------------------------------
+from chat_memory import (  # noqa: E402
+    clear_chat_history,
+    initiate,
+    initiate_memory,
+    save_chat_history,
+    save_to_memory,
+)
+from chat_s3 import (  # noqa: E402
+    create_object,
+    get_s3_client,
+    get_s3_resource,
+    updata_object,
+    upload_to_s3,
+    upload_to_s3_artifacts,
+)
+from chat_documents import (  # noqa: E402
+    MAX_IMAGE_PIXELS,
+    _file_name_from_ref,
+    _resize_and_encode,
+    extract_text,
+    get_summary,
+    get_summary_of_uploaded_file,
+    load_csv_document,
+    load_document,
+    summarize_image,
+    summary_image,
+)
+from chat_tools import (  # noqa: E402
+    _build_tool_reference,
+    _extract_rag_references_from_payload,
+    _format_references_markdown,
+    _sanitize_reference_text,
+    get_tool_info,
+)
+from chat_rag import (  # noqa: E402
+    MAX_RETRIEVE_PAGES,
+    _bedrock_retrieve_pages,
+    retrieve,
+    run_rag_using_retrieve_and_generate,
+    run_rag_with_knowledge_base,
+)

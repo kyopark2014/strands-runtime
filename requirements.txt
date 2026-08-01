@@ -1,7 +1,14 @@
-bedrock-agentcore
+# CVE pins: bedrock-agentcore>=1.18.1 (CVE-2026-16796),
+# python-multipart>=0.0.31, urllib3>=2.7.0, setuptools>=83.0.0,
+# py>=1.11.0 (CVE-2020-29651), tqdm>=4.66.3 (CVE-2016-10075 / CVE-2024-34062)
+bedrock-agentcore>=1.18.1
 bedrock-agentcore-starter-toolkit
 fastapi
-python-multipart
+python-multipart>=0.0.31
+urllib3>=2.7.0
+setuptools>=83.0.0
+py>=1.11.0
+tqdm>=4.66.3
 uvicorn[standard]
 pandas
 numpy

@@ -1,14 +1,31 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """AgentCore Evaluations setup: execution role and online evaluation config."""
 
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
 import boto3
 from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_EVALUATORS = [
     "Builtin.Helpfulness",
@@ -256,7 +273,14 @@ def _find_online_evaluation_config(client, config_name: str) -> dict[str, Any] |
         params: dict[str, Any] = {}
         if next_token:
             params["nextToken"] = next_token
-        response = client.list_online_evaluation_configs(**params)
+        try:
+            response = client.list_online_evaluation_configs(**params)
+        except ClientError:
+            logger.exception(
+                "Failed to list online evaluation configs while looking up %s",
+                config_name,
+            )
+            return None
         for item in response.get("onlineEvaluationConfigs", []):
             if item.get("onlineEvaluationConfigName") == config_name:
                 return item
@@ -316,17 +340,27 @@ def cleanup_stale_agent_runtimes(
 
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     deleted: list[str] = []
-    for runtime in client.list_agent_runtimes().get("agentRuntimes", []):
-        runtime_id = runtime.get("agentRuntimeId", "")
-        runtime_name = runtime.get("agentRuntimeName", "")
-        if runtime_id == active_id or runtime_name not in stale_names:
-            continue
-        try:
-            client.delete_agent_runtime(agentRuntimeId=runtime_id)
-            deleted.append(f"{runtime_name} ({runtime_id})")
-            print(f"  Deleted stale agent runtime: {runtime_name} ({runtime_id})")
-        except ClientError as error:
-            print(f"  Warning: failed to delete stale runtime {runtime_name}: {error}")
+    next_token = None
+    while True:
+        params: dict[str, Any] = {}
+        if next_token:
+            params["nextToken"] = next_token
+        response = client.list_agent_runtimes(**params)
+        for runtime in response.get("agentRuntimes", []):
+            runtime_id = runtime.get("agentRuntimeId", "")
+            runtime_name = runtime.get("agentRuntimeName", "")
+            if runtime_id == active_id or runtime_name not in stale_names:
+                continue
+            try:
+                client.delete_agent_runtime(agentRuntimeId=runtime_id)
+                deleted.append(f"{runtime_name} ({runtime_id})")
+                print(f"  Deleted stale agent runtime: {runtime_name} ({runtime_id})")
+            except ClientError as error:
+                code = error.response.get("Error", {}).get("Code", type(error).__name__)
+                print(f"  Warning: failed to delete stale runtime {runtime_name}: {code}")
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
     return deleted
 
 

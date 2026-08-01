@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 FROM --platform=linux/arm64 python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,11 +32,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-RUN pip install boto3 botocore --upgrade
+RUN pip install --upgrade "setuptools>=83.0.0" \
+    && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
 # Keep FastMCP (mcp.server.fastmcp). mcp 2.x removed it; pin 1.x for stdio MCP servers.
 RUN pip install "mcp>=1.9.0,<2"
 RUN pip install "strands-agents[openai,otel]>=1.44.0" "strands-agents-tools>=0.8.1"
-RUN pip install bedrock-agentcore uv
+# CVE-2026-16796 fixed in bedrock-agentcore>=1.18.1
+RUN pip install "bedrock-agentcore>=1.18.1" uv
 RUN pip install "mcp>=1.9.0,<2"
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
@@ -39,6 +55,11 @@ RUN pip install aws-opentelemetry-distro>=0.10.0
 
 COPY . .
 
+RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
+    && chown -R appuser:appuser /app
+
+USER appuser
+
 ENV PYTHONPATH=/app
 ENV ALLOW_MISSING_RAG_CONFIG=1
 ENV BYPASS_TOOL_CONSENT=true
@@ -49,5 +70,9 @@ ARG OTEL_SERVICE_NAME=strands_runtime.DEFAULT
 ENV OTEL_RESOURCE_ATTRIBUTES=service.name=${OTEL_SERVICE_NAME}
 
 EXPOSE 8080
+
+# AgentCore runtimes expose /ping for health probes.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
+  CMD curl --fail http://localhost:8080/ping || exit 1
 
 CMD ["uv", "run", "opentelemetry-instrument", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]

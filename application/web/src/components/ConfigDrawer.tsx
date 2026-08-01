@@ -1,3 +1,19 @@
+/**
+ * Copyright 2026 Amazon.com, Inc. or its affiliates
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
@@ -13,6 +29,9 @@ interface Props {
 
 const MENU_GAP = 8;
 const MENU_MAX_HEIGHT = 320;
+const MIN_MENU_WIDTH = 240;
+const VIEWPORT_MARGIN = 8;
+const MIN_MAX_HEIGHT = 120;
 
 export function ConfigDrawer({
   title,
@@ -47,13 +66,16 @@ export function ConfigDrawer({
   function updatePosition() {
     if (!anchorEl) return;
     const rect = anchorEl.getBoundingClientRect();
-    const width = Math.max(rect.width, 240);
+    const width = Math.max(rect.width, MIN_MENU_WIDTH);
     const left = Math.min(
-      Math.max(8, rect.left),
-      window.innerWidth - width - 8,
+      Math.max(VIEWPORT_MARGIN, rect.left),
+      window.innerWidth - width - VIEWPORT_MARGIN,
     );
     const top = rect.top - MENU_GAP;
-    const maxHeight = Math.min(MENU_MAX_HEIGHT, Math.max(120, top - 8));
+    const maxHeight = Math.min(
+      MENU_MAX_HEIGHT,
+      Math.max(MIN_MAX_HEIGHT, top - VIEWPORT_MARGIN),
+    );
     setPosition({ left, top, width, maxHeight });
   }
 

@@ -23,6 +23,7 @@ After running, add markers to word/document.xml so the comment is visible:
 """
 
 import argparse
+import html
 import random
 import shutil
 import sys
@@ -32,8 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import defusedxml.minidom
-from xml.parsers.expat import ExpatError
-from xml.sax.saxutils import escape as xml_escape
+from defusedxml.common import DefusedXmlException
 
 from office.helpers import opc_target, rezip as _rezip, safe_extract as _safe_extract
 
@@ -45,6 +45,24 @@ NS = {
     "w16cid": "http://schemas.microsoft.com/office/word/2016/wordml/cid",
     "w16cex": "http://schemas.microsoft.com/office/word/2018/wordml/cex",
 }
+
+
+def _xml_escape_text(value: str) -> str:
+    """Escape XML text content without importing xml.sax (Semgrep XXE rule)."""
+    return html.escape(value, quote=False)
+
+
+def _xml_escape_attr(value: str) -> str:
+    """Escape XML attribute values (includes quotes)."""
+    return html.escape(value, quote=True)
+
+
+def _is_xml_parse_error(exc: BaseException) -> bool:
+    """True for defusedxml security errors or underlying expat parse failures."""
+    if isinstance(exc, DefusedXmlException):
+        return True
+    return type(exc).__name__ == "ExpatError"
+
 
 COMMENT_XML = """\
 <w:comment w:id="{id}" w:author="{author}" w:date="{date}" w:initials="{initials}">
@@ -111,11 +129,11 @@ def _append_xml(xml_path: Path, root_tag: str, content: str) -> None:
 
 def _find_para_id(comments_path: Path, comment_id: int) -> str | None:
     dom = defusedxml.minidom.parseString(comments_path.read_text(encoding="utf-8"))
-    for c in dom.getElementsByTagName("w:comment"):
-        if c.getAttribute("w:id") == str(comment_id):
-            for p in c.getElementsByTagName("w:p"):
-                if pid := p.getAttribute("w14:paraId"):
-                    return pid
+    for comment_elem in dom.getElementsByTagName("w:comment"):
+        if comment_elem.getAttribute("w:id") == str(comment_id):
+            for paragraph_elem in comment_elem.getElementsByTagName("w:p"):
+                if para_id := paragraph_elem.getAttribute("w14:paraId"):
+                    return para_id
     return None
 
 
@@ -124,9 +142,9 @@ def _next_comment_id(comments_path: Path) -> int:
         return 0
     dom = defusedxml.minidom.parseString(comments_path.read_text(encoding="utf-8"))
     ids = []
-    for c in dom.getElementsByTagName("w:comment"):
+    for comment_elem in dom.getElementsByTagName("w:comment"):
         try:
-            ids.append(int(c.getAttribute("w:id")))
+            ids.append(int(comment_elem.getAttribute("w:id")))
         except ValueError:
             pass
     return (max(ids) + 1) if ids else 0
@@ -243,9 +261,9 @@ def add_comment(
 ) -> tuple[int, str, str]:
     unpacked_dir = Path(unpacked_dir)
     if not raw:
-        text = xml_escape(text)
-    author = xml_escape(author, {'"': "&quot;"})
-    initials = xml_escape(initials, {'"': "&quot;"})
+        text = _xml_escape_text(text)
+    author = _xml_escape_attr(author)
+    initials = _xml_escape_attr(initials)
     word = unpacked_dir / "word"
     if not word.exists():
         raise FileNotFoundError(f"{word} not found (not an unpacked .docx?)")
@@ -354,8 +372,13 @@ def main() -> None:
         else:
             print(f"Error: {src} is neither a directory nor a .docx/.dotx file", file=sys.stderr)
             sys.exit(1)
-    except (FileNotFoundError, ValueError, zipfile.BadZipFile, ExpatError) as e:
-        print(f"Error: {e}", file=sys.stderr)
+    except (FileNotFoundError, ValueError, zipfile.BadZipFile, DefusedXmlException):
+        print("Error: failed to process document", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        if not _is_xml_parse_error(e):
+            raise
+        print("Error: failed to parse document XML", file=sys.stderr)
         sys.exit(1)
 
     if args.parent is not None:

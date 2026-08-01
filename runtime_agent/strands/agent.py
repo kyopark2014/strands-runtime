@@ -1,6 +1,19 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 import logging
 import sys
-import traceback
 
 import chat
 import httpx
@@ -105,7 +118,17 @@ app = BedrockAgentCoreApp()
 
 @app.entrypoint
 async def agent_strands(payload):
-    """Invoke the Strands agent with a payload."""
+    """Entry point: invoke the Strands agent with a payload.
+
+    Thin wrapper; the actual orchestration lives in _run_agent_strands so the
+    entrypoint itself stays free of business logic.
+    """
+    async for event in _run_agent_strands(payload):
+        yield event
+
+
+async def _run_agent_strands(payload):
+    """Run one Strands agent turn: configure, stream the agent, and yield events."""
     logger.info(f"payload: {payload}")
 
     query = payload.get("prompt")
@@ -202,8 +225,13 @@ async def agent_strands(payload):
             try:
                 summary = chat.get_summary_of_uploaded_file(file_ref, prompt=query or "")
             except Exception as e:
-                logger.error(f"Failed to summarize file {file_ref}: {traceback.format_exc()}")
-                summary = f"파일 분석 중 오류가 발생했습니다: {e}"
+                logger.error(
+                    "Failed to summarize file %s: %s",
+                    file_ref,
+                    type(e).__name__,
+                    exc_info=True,
+                )
+                summary = "파일 분석 중 오류가 발생했습니다"
             file_summaries.append(
                 f"선택한 파일({file_name})의 내용을 요약하면 아래와 같습니다.\n\n{summary}"
             )
@@ -219,94 +247,101 @@ async def agent_strands(payload):
     tool_names: dict[str, str] = {}
 
     with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
-        agent_stream = strands_agent.agent.stream_async(query)
+        try:
+            agent_stream = strands_agent.agent.stream_async(query)
 
-        async for event in agent_stream:
-            if "data" in event:
-                text = event["data"]
-                streamed_text += text
-                logger.info(f"[data] {text}")
-                yield {"data": text}
+            async for event in agent_stream:
+                if "data" in event:
+                    text = event["data"]
+                    streamed_text += text
+                    logger.info(f"[data] {text}")
+                    yield {"data": text}
 
-            elif "result" in event:
-                final = event["result"]
-                message = final.message
-                if message:
-                    content = message.get("content", [])
-                    text = content[0].get("text", "") if content else ""
-                    logger.info(f"[result] {text}")
-                    final_output = {"messages": text, "image_url": image_urls}
+                elif "result" in event:
+                    final = event["result"]
+                    message = final.message
+                    if message:
+                        content = message.get("content", [])
+                        text = content[0].get("text", "") if content else ""
+                        logger.info(f"[result] {text}")
+                        final_output = {"messages": text, "image_url": image_urls}
 
-                try:
-                    import cloudwatch_metrics
+                    try:
+                        import cloudwatch_metrics
 
-                    strands_agent._log_prompt_cache_usage(final)
+                        strands_agent._log_prompt_cache_usage(final)
 
-                    usage = cloudwatch_metrics.extract_token_usage(final)
-                    if not usage:
-                        metrics = getattr(final, "metrics", None)
-                        logger.warning(
-                            "Token usage missing on AgentResult; CloudWatch metrics skipped "
-                            "(model=%s accumulated_usage=%s)",
-                            chat.model_id,
-                            getattr(metrics, "accumulated_usage", None) if metrics else None,
-                        )
-                    else:
-                        cloudwatch_metrics.publish_token_metrics(chat.model_id, final)
-                except Exception as metric_err:
-                    logger.warning(f"CloudWatch token metrics publish skipped: {metric_err}")
+                        usage = cloudwatch_metrics.extract_token_usage(final)
+                        if not usage:
+                            metrics = getattr(final, "metrics", None)
+                            logger.warning(
+                                "Token usage missing on AgentResult; CloudWatch metrics skipped "
+                                "(model=%s accumulated_usage=%s)",
+                                chat.model_id,
+                                getattr(metrics, "accumulated_usage", None) if metrics else None,
+                            )
+                        else:
+                            cloudwatch_metrics.publish_token_metrics(chat.model_id, final)
+                    except Exception as metric_err:
+                        logger.warning(f"CloudWatch token metrics publish skipped: {metric_err}")
 
-            elif "current_tool_use" in event:
-                current_tool_use = event["current_tool_use"]
-                name = current_tool_use.get("name", "")
-                input_val = current_tool_use.get("input", "")
-                tool_use_id = current_tool_use.get("toolUseId", "")
-                logger.info(f"[current_tool_use] name={name}, input={input_val}")
+                elif "current_tool_use" in event:
+                    current_tool_use = event["current_tool_use"]
+                    name = current_tool_use.get("name", "")
+                    input_val = current_tool_use.get("input", "")
+                    tool_use_id = current_tool_use.get("toolUseId", "")
+                    logger.info(f"[current_tool_use] name={name}, input={input_val}")
 
-                if tool_use_id:
-                    tool_names[tool_use_id] = name
-                yield {"tool": name, "input": input_val, "toolUseId": tool_use_id}
+                    if tool_use_id:
+                        tool_names[tool_use_id] = name
+                    yield {"tool": name, "input": input_val, "toolUseId": tool_use_id}
 
-            elif "message" in event:
-                message = event["message"]
-                logger.info(f"[message] {message}")
+                elif "message" in event:
+                    message = event["message"]
+                    logger.info(f"[message] {message}")
 
-                msg_content = message.get("content", [])
-                for item in msg_content:
-                    if "toolResult" not in item:
-                        continue
-                    tool_result = item["toolResult"]
-                    tool_use_id = tool_result["toolUseId"]
-                    tool_content = tool_result["content"]
-                    tool_result_text = tool_content[0].get("text", "") if tool_content else ""
-                    tool_name = tool_names.get(tool_use_id, "")
-                    logger.info(f"[toolResult] {tool_result_text}, [toolUseId] {tool_use_id}")
+                    msg_content = message.get("content", [])
+                    for item in msg_content:
+                        if "toolResult" not in item:
+                            continue
+                        tool_result = item["toolResult"]
+                        tool_use_id = tool_result["toolUseId"]
+                        tool_content = tool_result["content"]
+                        tool_result_text = tool_content[0].get("text", "") if tool_content else ""
+                        tool_name = tool_names.get(tool_use_id, "")
+                        logger.info(f"[toolResult] {tool_result_text}, [toolUseId] {tool_use_id}")
 
-                    yield {"toolResult": tool_result_text, "toolUseId": tool_use_id}
+                        yield {"toolResult": tool_result_text, "toolUseId": tool_use_id}
 
-                    _, urls, _ = chat.get_tool_info(tool_name, tool_result_text)
-                    if urls:
-                        for url in urls:
-                            if url not in image_urls:
-                                image_urls.append(url)
+                        _, urls, _ = chat.get_tool_info(tool_name, tool_result_text)
+                        if urls:
+                            for url in urls:
+                                if url not in image_urls:
+                                    image_urls.append(url)
 
-            elif "contentBlockDelta" or "contentBlockStop" or "messageStop" or "metadata" in event:
-                pass
-            else:
-                logger.info(f"event: {event}")
+                elif "contentBlockDelta" or "contentBlockStop" or "messageStop" or "metadata" in event:
+                    pass
+                else:
+                    logger.info(f"event: {event}")
 
-        result_text = final_output.get("messages") or streamed_text
+            result_text = final_output.get("messages") or streamed_text
 
-        if not (result_text or "").strip() and streamed_text.strip():
-            result_text = streamed_text
+            if not (result_text or "").strip() and streamed_text.strip():
+                result_text = streamed_text
 
-        final_output = {
-            "messages": result_text if result_text else "답변을 찾지 못하였습니다.",
-            "image_url": image_urls,
-        }
+            final_output = {
+                "messages": result_text if result_text else "답변을 찾지 못하였습니다.",
+                "image_url": image_urls,
+            }
 
-        if chat.memory_enabled:
-            chat.save_to_memory(query, result_text)
+            if chat.memory_enabled:
+                chat.save_to_memory(query, final_output["messages"])
+        except Exception:
+            logger.exception("Agent stream_async failed")
+            final_output = {
+                "messages": "에이전트 응답 처리 중 오류가 발생했습니다.",
+                "image_url": image_urls,
+            }
 
     yield {"result": final_output}
 

@@ -18,6 +18,9 @@ from pathlib import Path
 
 from scripts.utils import parse_skill_md
 
+# Pipe read chunk size: 8 KiB balances syscall overhead vs latency for JSONL events.
+STDOUT_READ_CHUNK_SIZE = 8192
+
 
 def find_project_root() -> Path:
     """Find the project root by walking up from cwd looking for .claude/.
@@ -82,13 +85,20 @@ def run_single_query(
         # programmatic subprocess usage is safe.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
 
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            cwd=project_root,
-            env=env,
-        )
+        try:
+            # Fixed `claude` binary argv list, shell=False; cwd=project_root.
+            # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
+            process = subprocess.Popen(  # nosec B603 — fixed `claude` binary + argv list, shell=False
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                cwd=project_root,
+                env=env,
+            )
+        except (FileNotFoundError, OSError, PermissionError) as e:
+            raise RuntimeError(
+                f"Failed to start claude subprocess: {type(e).__name__}"
+            ) from e
 
         triggered = False
         start_time = time.time()
@@ -109,7 +119,7 @@ def run_single_query(
                 if not ready:
                     continue
 
-                chunk = os.read(process.stdout.fileno(), 8192)
+                chunk = os.read(process.stdout.fileno(), STDOUT_READ_CHUNK_SIZE)
                 if not chunk:
                     break
                 buffer += chunk.decode("utf-8", errors="replace")
@@ -127,13 +137,13 @@ def run_single_query(
 
                     # Early detection via stream events
                     if event.get("type") == "stream_event":
-                        se = event.get("event", {})
-                        se_type = se.get("type", "")
+                        stream_event = event.get("event", {})
+                        se_type = stream_event.get("type", "")
 
                         if se_type == "content_block_start":
-                            cb = se.get("content_block", {})
-                            if cb.get("type") == "tool_use":
-                                tool_name = cb.get("name", "")
+                            content_block = stream_event.get("content_block", {})
+                            if content_block.get("type") == "tool_use":
+                                tool_name = content_block.get("name", "")
                                 if tool_name in ("Skill", "Read"):
                                     pending_tool_name = tool_name
                                     accumulated_json = ""
@@ -141,7 +151,7 @@ def run_single_query(
                                     return False
 
                         elif se_type == "content_block_delta" and pending_tool_name:
-                            delta = se.get("delta", {})
+                            delta = stream_event.get("delta", {})
                             if delta.get("type") == "input_json_delta":
                                 accumulated_json += delta.get("partial_json", "")
                                 if clean_name in accumulated_json:
@@ -269,7 +279,11 @@ def main():
     parser.add_argument("--verbose", action="store_true", help="Print progress to stderr")
     args = parser.parse_args()
 
-    eval_set = json.loads(Path(args.eval_set).read_text())
+    try:
+        eval_set = json.loads(Path(args.eval_set).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        print("Error: Failed to load eval set", file=sys.stderr)
+        sys.exit(1)
     skill_path = Path(args.skill_path)
 
     if not (skill_path / "SKILL.md").exists():

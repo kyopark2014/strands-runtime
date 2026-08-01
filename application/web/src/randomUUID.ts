@@ -1,3 +1,19 @@
+/**
+ * Copyright 2026 Amazon.com, Inc. or its affiliates
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 /** UUID for client-side ids. Falls back when crypto.randomUUID is unavailable (non-secure HTTP). */
 export function randomUUID(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -6,13 +22,16 @@ export function randomUUID(): string {
   if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
     const bytes = new Uint8Array(16);
     crypto.getRandomValues(bytes);
+    // RFC 4122 §4.4: set the 4-bit version field (byte 6, high nibble) to 0100 (version 4).
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    // RFC 4122 §4.4: set the 2-bit variant field (byte 8, high bits) to 10 (variant 1).
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
     const r = (Math.random() * 16) | 0;
+    // RFC 4122 §4.4: for the "y" position, force variant bits (0x3 mask, 0x8 set) to 10xx.
     const v = c === "x" ? r : (r & 0x3) | 0x8;
     return v.toString(16);
   });

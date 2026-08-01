@@ -258,14 +258,30 @@ def main():
     parser.add_argument("--results-dir", default=None, help="Save all outputs (results.json, report.html, log.txt) to a timestamped subdirectory here")
     args = parser.parse_args()
 
-    eval_set = json.loads(Path(args.eval_set).read_text())
+    eval_path = Path(args.eval_set)
+    try:
+        eval_set = json.loads(eval_path.read_text())
+    except FileNotFoundError:
+        print(f"Error: eval set not found: {eval_path}", file=sys.stderr)
+        sys.exit(1)
+    except OSError as error:
+        print(f"Error: cannot read eval set ({type(error).__name__})", file=sys.stderr)
+        sys.exit(1)
+    except json.JSONDecodeError:
+        print(f"Error: invalid JSON in eval set: {eval_path}", file=sys.stderr)
+        sys.exit(1)
+
     skill_path = Path(args.skill_path)
 
     if not (skill_path / "SKILL.md").exists():
         print(f"Error: No SKILL.md found at {skill_path}", file=sys.stderr)
         sys.exit(1)
 
-    name, _, _ = parse_skill_md(skill_path)
+    try:
+        name, _, _ = parse_skill_md(skill_path)
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Error: failed to parse SKILL.md ({type(error).__name__})", file=sys.stderr)
+        sys.exit(1)
 
     # Set up live report path
     if args.report != "none":

@@ -1,5 +1,24 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Server-side chat backend for the Web UI ECS task.
+
+Uses boto3 (bedrock-runtime, sts) with the task IAM role — not browser JavaScript.
+Direct frontend→AWS SDK calls (AR1) do not apply to this module.
+"""
+
 import boto3
-import uuid
 import logging
 import sys
 try:
@@ -22,25 +41,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger("chat")
 
+MAX_REASONING_OUTPUT_TOKENS = 64000
+REASONING_BUFFER_TOKENS = 1000
+
 config = utils.load_config()
 bedrock_region = config['region']
-accountId = config['accountId']
-projectName = config['projectName']
+account_id = config['accountId']
+project_name = config['projectName']
 
 model_name = "Claude 4.5 Haiku"
 model_type = "claude"
 models = info.get_model_info(model_name)
 model_id = models[0]["model_id"]
 
-user_id = None 
-debug_mode = 'Disable'
-
-def update(modelName):
+def update(model_name_param):
     global model_name, models, model_type, model_id
 
-    if modelName is not model_name:
-        model_name = modelName
-        logger.info(f"modelName: {modelName}")
+    if model_name_param is not model_name:
+        model_name = model_name_param
+        logger.info(f"modelName: {model_name_param}")
 
         models = info.get_model_info(model_name)
         model_type = models[0]["model_type"]
@@ -58,6 +77,8 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
         def bearer_token_provider() -> str:
             return bedrock_data_retention.get_bedrock_bearer_token(bedrock_region)
 
+        # bedrock-mantle is the Amazon Bedrock OpenAI-compatible endpoint (not a separate
+        # AWS service): https://docs.aws.amazon.com/bedrock/latest/userguide/bedrock-mantle.html
         return ChatOpenAI(
             model=model_id,
             api_key=bearer_token_provider,
@@ -66,14 +87,18 @@ def _build_openai_chat(profile: dict, max_output_tokens: int):
             max_tokens=max_output_tokens,
         )
 
-    boto3_bedrock = boto3.client(
-        service_name="bedrock-runtime",
-        region_name=bedrock_region,
-        config=Config(
-            retries={"max_attempts": 30},
-            read_timeout=300,
-        ),
-    )
+    try:
+        boto3_bedrock = boto3.client(
+            service_name="bedrock-runtime",
+            region_name=bedrock_region,
+            config=Config(
+                retries={"max_attempts": 30},
+                read_timeout=300,
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to create bedrock-runtime client")
+        raise
     chat = ChatBedrock(
         model_id=model_id,
         client=boto3_bedrock,
@@ -93,13 +118,13 @@ def get_chat(extended_thinking=None):
     logger.info(f"model_name: {model_name}")
     profile = models[0]
     bedrock_region =  profile['bedrock_region']
-    modelId = profile['model_id']
+    model_id = profile['model_id']
     model_type = profile['model_type']
-    maxOutputTokens = 4096 # 4k
-    logger.info(f"LLM: bedrock_region: {bedrock_region}, modelId: {modelId}, model_type: {model_type}")
+    max_output_tokens = 4096 # 4k
+    logger.info(f"LLM: bedrock_region: {bedrock_region}, modelId: {model_id}, model_type: {model_type}")
 
     if profile["model_type"] == "openai":
-        return _build_openai_chat(profile, maxOutputTokens)
+        return _build_openai_chat(profile, max_output_tokens)
 
     if profile['model_type'] == 'nova':
         STOP_SEQUENCE = '"\n\n<thinking>", "\n<thinking>", " <thinking>"'
@@ -108,24 +133,27 @@ def get_chat(extended_thinking=None):
     else:
         STOP_SEQUENCE = ""
                           
-    # bedrock   
-    boto3_bedrock = boto3.client(
-        service_name='bedrock-runtime',
-        region_name=bedrock_region,
-        config=Config(
-            retries = {
-                'max_attempts': 30
-            }
+    # bedrock
+    try:
+        boto3_bedrock = boto3.client(
+            service_name='bedrock-runtime',
+            region_name=bedrock_region,
+            config=Config(
+                retries = {
+                    'max_attempts': 30
+                }
+            )
         )
-    )
+    except Exception:
+        logger.exception("Failed to create bedrock-runtime client")
+        raise
     
     if extended_thinking=='Enable':
-        maxReasoningOutputTokens=64000
         logger.info(f"extended_thinking: {extended_thinking}")
-        thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens-1000)
+        thinking_budget = min(max_output_tokens, MAX_REASONING_OUTPUT_TOKENS - REASONING_BUFFER_TOKENS)
 
         parameters = {
-            "max_tokens":maxReasoningOutputTokens,
+            "max_tokens":MAX_REASONING_OUTPUT_TOKENS,
             "temperature":1,            
             "thinking": {
                 "type": "enabled",
@@ -135,14 +163,14 @@ def get_chat(extended_thinking=None):
         }
     else:
         parameters = {
-            "max_tokens":maxOutputTokens,     
+            "max_tokens":max_output_tokens,     
             "temperature":0.1,
             "top_k":250,
             "stop_sequences": [STOP_SEQUENCE]
         }
 
     chat = ChatBedrock(   # new chat model
-        model_id=modelId,
+        model_id=model_id,
         client=boto3_bedrock, 
         model_kwargs=parameters,
         region_name=bedrock_region

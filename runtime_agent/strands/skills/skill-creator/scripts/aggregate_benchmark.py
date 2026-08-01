@@ -117,13 +117,18 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     continue
 
                 try:
-                    with open(grading_file) as f:
-                        grading = json.load(f)
-                except json.JSONDecodeError as e:
-                    print(f"Warning: Invalid JSON in {grading_file}: {e}")
+                    with open(grading_file) as grading_handle:
+                        grading = json.load(grading_handle)
+                except FileNotFoundError:
+                    print(f"Warning: grading.json not found in {run_dir}")
+                    continue
+                except OSError as error:
+                    print(f"Warning: cannot read {grading_file}: {type(error).__name__}")
+                    continue
+                except json.JSONDecodeError:
+                    print(f"Warning: Invalid JSON in {grading_file}")
                     continue
 
-                # Extract metrics
                 result = {
                     "eval_id": eval_id,
                     "run_number": run_number,
@@ -146,7 +151,6 @@ def load_run_results(benchmark_dir: Path) -> dict:
                     except json.JSONDecodeError:
                         pass
 
-                # Extract metrics if available
                 metrics = grading.get("execution_metrics", {})
                 result["tool_calls"] = metrics.get("total_tool_calls", 0)
                 if not result.get("tokens"):
@@ -160,7 +164,6 @@ def load_run_results(benchmark_dir: Path) -> dict:
                         print(f"Warning: expectation in {grading_file} missing required fields (text, passed, evidence): {exp}")
                 result["expectations"] = raw_expectations
 
-                # Extract notes from user_notes_summary
                 notes_summary = grading.get("user_notes_summary", {})
                 notes = []
                 notes.extend(notes_summary.get("uncertainties", []))
@@ -231,7 +234,6 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
     results = load_run_results(benchmark_dir)
     run_summary = aggregate_results(results)
 
-    # Build runs array for benchmark.json
     runs = []
     for config in results:
         for result in results[config]:
@@ -253,7 +255,6 @@ def generate_benchmark(benchmark_dir: Path, skill_name: str = "", skill_path: st
                 "notes": result["notes"]
             })
 
-    # Determine eval IDs from results
     eval_ids = sorted(set(
         r["eval_id"]
         for config in results.values()
@@ -283,7 +284,6 @@ def generate_markdown(benchmark: dict) -> str:
     metadata = benchmark["metadata"]
     run_summary = benchmark["run_summary"]
 
-    # Determine config names (excluding "delta")
     configs = [k for k in run_summary if k != "delta"]
     config_a = configs[0] if len(configs) >= 1 else "config_a"
     config_b = configs[1] if len(configs) >= 2 else "config_b"
@@ -307,22 +307,18 @@ def generate_markdown(benchmark: dict) -> str:
     b_summary = run_summary.get(config_b, {})
     delta = run_summary.get("delta", {})
 
-    # Format pass rate
     a_pr = a_summary.get("pass_rate", {})
     b_pr = b_summary.get("pass_rate", {})
     lines.append(f"| Pass Rate | {a_pr.get('mean', 0)*100:.0f}% ± {a_pr.get('stddev', 0)*100:.0f}% | {b_pr.get('mean', 0)*100:.0f}% ± {b_pr.get('stddev', 0)*100:.0f}% | {delta.get('pass_rate', '—')} |")
 
-    # Format time
     a_time = a_summary.get("time_seconds", {})
     b_time = b_summary.get("time_seconds", {})
     lines.append(f"| Time | {a_time.get('mean', 0):.1f}s ± {a_time.get('stddev', 0):.1f}s | {b_time.get('mean', 0):.1f}s ± {b_time.get('stddev', 0):.1f}s | {delta.get('time_seconds', '—')}s |")
 
-    # Format tokens
     a_tokens = a_summary.get("tokens", {})
     b_tokens = b_summary.get("tokens", {})
     lines.append(f"| Tokens | {a_tokens.get('mean', 0):.0f} ± {a_tokens.get('stddev', 0):.0f} | {b_tokens.get('mean', 0):.0f} ± {b_tokens.get('stddev', 0):.0f} | {delta.get('tokens', '—')} |")
 
-    # Notes section
     if benchmark.get("notes"):
         lines.extend([
             "",
@@ -366,25 +362,20 @@ def main():
         print(f"Directory not found: {args.benchmark_dir}")
         sys.exit(1)
 
-    # Generate benchmark
     benchmark = generate_benchmark(args.benchmark_dir, args.skill_name, args.skill_path)
 
-    # Determine output paths
     output_json = args.output or (args.benchmark_dir / "benchmark.json")
     output_md = output_json.with_suffix(".md")
 
-    # Write benchmark.json
     with open(output_json, "w") as f:
         json.dump(benchmark, f, indent=2)
     print(f"Generated: {output_json}")
 
-    # Write benchmark.md
     markdown = generate_markdown(benchmark)
     with open(output_md, "w") as f:
         f.write(markdown)
     print(f"Generated: {output_md}")
 
-    # Print summary
     run_summary = benchmark["run_summary"]
     configs = [k for k in run_summary if k != "delta"]
     delta = run_summary.get("delta", {})
