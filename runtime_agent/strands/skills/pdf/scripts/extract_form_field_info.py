@@ -108,10 +108,17 @@ def get_field_info(reader: PdfReader):
 
 
 def write_field_info(pdf_path: str, json_output_path: str):
-    reader = PdfReader(pdf_path)
-    field_info = get_field_info(reader)
-    with open(json_output_path, "w") as f:
-        json.dump(field_info, f, indent=2)
+    try:
+        reader = PdfReader(pdf_path)
+        field_info = get_field_info(reader)
+        with open(json_output_path, "w") as f:
+            json.dump(field_info, f, indent=2)
+    except Exception as exc:
+        print(
+            f"Error: failed to extract form fields ({type(exc).__name__})",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     print(f"Wrote {len(field_info)} fields to {json_output_path}")
 
 

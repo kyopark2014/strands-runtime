@@ -116,53 +116,66 @@ def upload_file_to_s3(s3_client, local_file, bucket_name, s3_key):
 def sync_knowledge_base(bedrock_client, knowledge_base_id):
     """Sync Knowledge Base data source"""
     try:
-        response = bedrock_client.list_data_sources(knowledgeBaseId=knowledge_base_id)
-        
-        if not response['dataSourceSummaries']:
+        summaries = []
+        next_token = None
+        while True:
+            params = {"knowledgeBaseId": knowledge_base_id, "maxResults": 100}
+            if next_token:
+                params["nextToken"] = next_token
+            response = bedrock_client.list_data_sources(**params)
+            summaries.extend(response.get("dataSourceSummaries") or [])
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+
+        if not summaries:
             logger.error("No data sources found for knowledge base")
             return False
-            
-        data_source_id = response['dataSourceSummaries'][0]['dataSourceId']
-        
+
+        data_source_id = summaries[0]["dataSourceId"]
+
         ingestion_response = bedrock_client.start_ingestion_job(
             knowledgeBaseId=knowledge_base_id,
             dataSourceId=data_source_id
         )
-        
+
         job_id = ingestion_response['ingestionJob']['ingestionJobId']
         logger.info(f"✓ Started ingestion job: {job_id}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to sync knowledge base: {e}")
         return False
 
 def main():
-    config = _require_config()
-    region = config['region']
-    s3_bucket = config['s3_bucket']
-    knowledge_base_id = config['knowledge_base_id']
-    
-    s3_client = boto3.client('s3', region_name=region)
-    bedrock_client = boto3.client('bedrock-agent', region_name=region)
-    
-    local_file = "contents/error_code.pdf"
-    s3_key = "docs/error_code.pdf"
-    
-    if not os.path.exists(local_file):
-        logger.error(f"File not found: {local_file}")
-        return False
-    
-    if check_file_exists_in_s3(s3_client, s3_bucket, s3_key):
-        logger.info(f"File already exists in S3, skipping upload: {s3_key}")
-    else:
-        if not upload_file_to_s3(s3_client, local_file, s3_bucket, s3_key):
+    try:
+        config = _require_config()
+        region = config['region']
+        s3_bucket = config['s3_bucket']
+        knowledge_base_id = config['knowledge_base_id']
+
+        s3_client = boto3.client('s3', region_name=region)
+        bedrock_client = boto3.client('bedrock-agent', region_name=region)
+
+        local_file = "contents/error_code.pdf"
+        s3_key = "docs/error_code.pdf"
+
+        if not os.path.exists(local_file):
+            logger.error(f"File not found: {local_file}")
             return False
-    
-    if sync_knowledge_base(bedrock_client, knowledge_base_id):
-        logger.info("✓ Knowledge Base sync initiated successfully")
-        return True
-    else:
+
+        if check_file_exists_in_s3(s3_client, s3_bucket, s3_key):
+            logger.info(f"File already exists in S3, skipping upload: {s3_key}")
+        else:
+            if not upload_file_to_s3(s3_client, local_file, s3_bucket, s3_key):
+                return False
+
+        if sync_knowledge_base(bedrock_client, knowledge_base_id):
+            logger.info("✓ Knowledge Base sync initiated successfully")
+            return True
+        return False
+    except Exception:
+        logger.exception("add_content failed")
         return False
 
 if __name__ == "__main__":

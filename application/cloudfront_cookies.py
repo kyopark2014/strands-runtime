@@ -87,8 +87,11 @@ def _load_from_secrets_manager() -> tuple[Optional[str], Optional[str]]:
             )
         return raw, (os.environ.get(_ENV_KEY_PAIR_ID) or "").strip() or None
     except Exception as e:
-        # Logs only the exception, never the signing material.
-        logger.debug("CloudFront signing material not loaded from Secrets Manager: %s", e)  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
+        # Log exception class only — never signing material or raw exception text.
+        logger.debug(  # nosemgrep: python.lang.security.audit.logging.python-logger-credential-disclosure
+            "CloudFront signing material not loaded from Secrets Manager: %s",
+            type(e).__name__,
+        )
         return None, None
 
 

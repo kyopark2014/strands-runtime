@@ -47,8 +47,8 @@ def _extract_rag_references_from_payload(json_data) -> list:
                 except (json.JSONDecodeError, TypeError) as e:
                     preview = text_val[:120] if isinstance(text_val, str) else repr(text_val)
                     logger.warning(
-                        "Skipping malformed RAG tool payload: %s; preview=%r",
-                        e,
+                        "Skipping malformed RAG tool payload (%s); preview=%r",
+                        type(e).__name__,
                         preview,
                     )
                     continue

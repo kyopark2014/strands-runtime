@@ -704,6 +704,7 @@ class BaseSchemaValidator:
                 relative_path = xml_file.relative_to(unpacked_dir)
                 print(f"FAILED - {relative_path}: {len(new_errors)} new error(s)")
                 for error in list(new_errors)[:3]:
+                    # Truncate long XSD messages for readable console output.
                     truncated = error[:250] + "..." if len(error) > 250 else error
                     print(f"  - {truncated}")
             return False, new_errors
@@ -738,7 +739,8 @@ class BaseSchemaValidator:
                 continue
 
             new_errors.append(f"  {relative_path}: {len(new_file_errors)} new error(s)")
-            for error in list(new_file_errors)[:3]:  
+            for error in list(new_file_errors)[:3]:
+                # Same console truncation as validate_file_against_xsd above.
                 new_errors.append(
                     f"    - {error[:250]}..." if len(error) > 250 else f"    - {error}"
                 )

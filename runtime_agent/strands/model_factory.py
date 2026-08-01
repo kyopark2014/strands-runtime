@@ -135,8 +135,10 @@ def get_model():
     if model_type == "claude":
         maxOutputTokens = chat.get_max_output_tokens(model_id)
     else:
+        # Default completion cap for non-Claude models (Bedrock converse-compatible).
         maxOutputTokens = 5120
 
+    # Bedrock extended-thinking budget ceiling (tokens); keep a buffer below this.
     maxReasoningOutputTokens = 64000
     thinking_budget = min(maxOutputTokens, maxReasoningOutputTokens - REASONING_BUFFER_TOKENS)
 

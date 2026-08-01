@@ -244,13 +244,12 @@ def _parse_knowledge_base_result(tool_content):
                     content_text = item["content"].get("text", "")
                     content += content_text + "\n\n"
 
-                    uri = ""
                     if "location" in item:
                         if "s3Location" in item["location"]:
                             uri = item["location"]["s3Location"]["uri"]
-
+                            urls.append(uri)
                             tool_references.append({
-                                "url": url,
+                                "url": uri,
                                 "title": uri.split("/")[-1],
                                 "content": content_text[:MAX_REFERENCE_CONTENT_LENGTH] + "..." if len(content_text) > MAX_REFERENCE_CONTENT_LENGTH else content_text
                             })

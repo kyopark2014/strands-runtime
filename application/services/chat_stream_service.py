@@ -275,10 +275,9 @@ class ChatStreamService:
                 response = json.dumps(response, ensure_ascii=False)
             result_holder["content"] = response
             result_holder["images"] = image_url or []
-        except Exception as exc:
+        except Exception:
             logger.exception("Agent run failed")
             result_holder["error"] = CLIENT_SAFE_AGENT_ERROR
-            result_holder["error_type"] = type(exc).__name__
         finally:
             message_queue.put(None)
 

@@ -49,16 +49,20 @@ def run_agent(
 
     if not use_agentcore_runtime():
         raise RuntimeError("AgentCore runtime is required for agent execution")
-    return agentcore_client.run_agent(
-        prompt,
-        user_id,
-        mcp_servers,
-        model_name,
-        runtime_session_id,
-        notification_queue=notification_queue,
-        skill_list=skill_list,
-        strands_tools=strands_tools,
-        guardrail_enabled=guardrail_enabled,
-        memory_enabled=memory_enabled,
-        files=files,
-    )
+    try:
+        return agentcore_client.run_agent(
+            prompt,
+            user_id,
+            mcp_servers,
+            model_name,
+            runtime_session_id,
+            notification_queue=notification_queue,
+            skill_list=skill_list,
+            strands_tools=strands_tools,
+            guardrail_enabled=guardrail_enabled,
+            memory_enabled=memory_enabled,
+            files=files,
+        )
+    except Exception:
+        logger.exception("AgentCore run_agent failed")
+        raise

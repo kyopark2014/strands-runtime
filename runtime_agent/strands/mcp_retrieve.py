@@ -107,8 +107,10 @@ def _resolve_knowledge_base_id():
         )
         knowledge_base_summaries = []
         next_token = None
-        while True:
-            list_kwargs = {}
+        # Cap pages so error-recovery lookup stays bounded on large accounts.
+        max_pages = 5
+        for _ in range(max_pages):
+            list_kwargs = {"maxResults": 100}
             if next_token:
                 list_kwargs["nextToken"] = next_token
             knowledge_base_page = bedrock_agent_client.list_knowledge_bases(

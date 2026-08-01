@@ -191,16 +191,16 @@ def search_location(query: str) -> dict | None:
         return None
 
     # Prefer results whose address matches more query tokens (e.g. Banpo 3-dong)
-    tokens = [t for t in re.split(r"\s+", query.strip()) if t]
+    tokens = [token for token in re.split(r"\s+", query.strip()) if token]
     def score(item: dict) -> tuple:
         addr = item.get("address") or ""
         title = item.get("title") or ""
         blob = f"{addr} {title}"
-        hit = sum(1 for t in tokens if t in blob)
+        hit = sum(1 for token in tokens if token in blob)
         # Bonus when a dong name token appears in the address
         dong_bonus = (
             DONG_NAME_MATCH_BONUS
-            if any(t.endswith("동") and t in addr for t in tokens)
+            if any(token.endswith("동") and token in addr for token in tokens)
             else 0
         )
         has_code = 1 if item.get("dongCode") else 0
@@ -663,8 +663,8 @@ def parse_airkorea(html: str, region: str) -> dict | None:
 
     summary = re.search(r"예보등급\s*○\s*([^<]+?)(?=<)", html, re.DOTALL)
     if summary:
-        s = _strip_html(summary.group(1)).strip().replace("&#039;", "'")
-        result["예보요약"] = s[:150] if s else None
+        summary_text = _strip_html(summary.group(1)).strip().replace("&#039;", "'")
+        result["예보요약"] = summary_text[:150] if summary_text else None
 
     table_match = re.search(
         r"오늘의 전국 미세먼지 예보</caption>.*?<tbody>(.*?)</tbody>", html, re.DOTALL
@@ -695,8 +695,10 @@ def parse_short_term_summary(html: str) -> dict:
         data["발표시각"] = issue_match.group(1)
     summary_match = re.search(r"□\s*\(종합\)\s*([^○]+?)(?=○|$)", html, re.DOTALL)
     if summary_match:
-        s = _strip_html(summary_match.group(1)).strip()
-        data["종합"] = re.sub(r"\s+", " ", s)[:200] if s else None
+        summary_text = _strip_html(summary_match.group(1)).strip()
+        data["종합"] = (
+            re.sub(r"\s+", " ", summary_text)[:200] if summary_text else None
+        )
     return data
 
 

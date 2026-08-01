@@ -117,6 +117,7 @@ def _load_or_create_local_key() -> bytes:
         )
         return value.encode("utf-8")
     try:
+        # Owner read/write only — local HMAC signing key must not be group/world readable.
         os.chmod(_LOCAL_KEY_FILE, 0o600)
     except OSError:
         pass

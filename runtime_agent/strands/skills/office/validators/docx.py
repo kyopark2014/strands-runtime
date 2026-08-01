@@ -2,6 +2,7 @@
 Validator for Word document XML files against XSD schemas.
 """
 
+import logging
 import random
 import re
 import tempfile
@@ -464,7 +465,9 @@ class DOCXSchemaValidator(BaseSchemaValidator):
                     repairs += len(pending)
 
             except Exception:
-                pass
+                logging.getLogger(__name__).warning(
+                    "durableId repair failed for %s", xml_file, exc_info=True
+                )
 
         return repairs
 

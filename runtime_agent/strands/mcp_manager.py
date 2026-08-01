@@ -229,10 +229,10 @@ class MCPClientManager:
                 except Exception as exc:
                     # One broken MCP (uvx/PyPI/gateway) must not abort the whole stream.
                     logger.error(
-                        "Skipping failed MCP client %r during start: %s: %s",
+                        "Skipping failed MCP client %r during start: %s",
                         name,
                         type(exc).__name__,
-                        e,
+                        exc_info=True,
                     )
                     continue
             if not started:

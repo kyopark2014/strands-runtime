@@ -62,8 +62,6 @@ logger = logging.getLogger("strands-agent")
 strands_tools = []
 mcp_servers = []
 
-tool_list = []
-
 memory_id = actor_id = session_id = namespace = None
 
 s3_prefix = "docs"

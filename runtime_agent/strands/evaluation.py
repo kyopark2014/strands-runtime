@@ -324,6 +324,8 @@ def cleanup_stale_agent_runtimes(
     if not stale_names:
         return []
 
+    from retry_utils import retry_call
+
     client = boto3.client("bedrock-agentcore-control", region_name=region)
     deleted: list[str] = []
     next_token = None
@@ -331,14 +333,24 @@ def cleanup_stale_agent_runtimes(
         params: dict[str, Any] = {}
         if next_token:
             params["nextToken"] = next_token
-        response = client.list_agent_runtimes(**params)
+        response = retry_call(
+            "list_agent_runtimes",
+            lambda: client.list_agent_runtimes(**params),
+            log=logger,
+        )
         for runtime in response.get("agentRuntimes", []):
             runtime_id = runtime.get("agentRuntimeId", "")
             runtime_name = runtime.get("agentRuntimeName", "")
             if runtime_id == active_id or runtime_name not in stale_names:
                 continue
             try:
-                client.delete_agent_runtime(agentRuntimeId=runtime_id)
+                retry_call(
+                    f"delete_agent_runtime:{runtime_id}",
+                    lambda rid=runtime_id: client.delete_agent_runtime(
+                        agentRuntimeId=rid
+                    ),
+                    log=logger,
+                )
                 deleted.append(f"{runtime_name} ({runtime_id})")
                 print(f"  Deleted stale agent runtime: {runtime_name} ({runtime_id})")
             except ClientError as error:

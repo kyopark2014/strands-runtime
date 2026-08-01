@@ -61,7 +61,8 @@ def merge_runs(input_dir: str) -> tuple[int, str]:
         return merge_count, f"Merged {merge_count} runs"
 
     except Exception as e:
-        return 0, f"Error: {e}"
+        print(f"merge_runs failed: {type(e).__name__}", file=sys.stderr)
+        return 0, "Error: failed to merge runs"
 
 
 

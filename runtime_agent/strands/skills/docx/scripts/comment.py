@@ -106,6 +106,7 @@ SMART_QUOTE_ENTITIES = {
 
 
 def _generate_hex_id() -> str:
+    # OOXML durableId/paraId must stay below signed 32-bit max (0x7FFFFFFF).
     return f"{random.randint(0, 0x7FFFFFFE):08X}"
 
 

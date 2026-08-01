@@ -115,18 +115,25 @@ def user_exists(client, user_pool_id: str, username: str) -> bool:
 
 def create_user(client, user_pool_id: str, username: str, password: str) -> None:
     """Create user and set a permanent password (no forced change on first login)."""
-    client.admin_create_user(
-        UserPoolId=user_pool_id,
-        Username=username,
-        TemporaryPassword=password,
-        MessageAction="SUPPRESS",
-    )
-    client.admin_set_user_password(
-        UserPoolId=user_pool_id,
-        Username=username,
-        Password=password,
-        Permanent=True,
-    )
+    try:
+        client.admin_create_user(
+            UserPoolId=user_pool_id,
+            Username=username,
+            TemporaryPassword=password,
+            MessageAction="SUPPRESS",
+        )
+        client.admin_set_user_password(
+            UserPoolId=user_pool_id,
+            Username=username,
+            Password=password,
+            Permanent=True,
+        )
+    except ClientError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to create Cognito user {username!r}"
+        ) from exc
 
 
 def test_login(

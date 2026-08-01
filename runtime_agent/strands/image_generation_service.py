@@ -76,13 +76,17 @@ def _upload_to_s3(image_bytes: bytes, filename: str) -> Optional[str]:
 
 
 def invoke_sd35(request_body: dict) -> dict:
-    response = get_bedrock_client().invoke_model(
-        modelId=MODEL_ID,
-        body=json.dumps(request_body),
-        contentType="application/json",
-        accept="application/json",
-    )
-    return json.loads(response["body"].read())
+    try:
+        response = get_bedrock_client().invoke_model(
+            modelId=MODEL_ID,
+            body=json.dumps(request_body),
+            contentType="application/json",
+            accept="application/json",
+        )
+        return json.loads(response["body"].read())
+    except Exception:
+        logger.exception("Bedrock invoke_model failed for model=%s", MODEL_ID)
+        raise
 
 
 def process_generation_result(result: dict, prefix: str = "sd35l") -> dict:

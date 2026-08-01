@@ -62,9 +62,15 @@ def get_application_config() -> dict[str, Any]:
     default_strands_tools = (
         config.get("default_strands_tool_selections") or DEFAULT_STRANDS_TOOLS
     )
-    default_skills = [s for s in default_skills if s in skill_options]
-    default_mcp = [m for m in default_mcp if m in mcp_options]
-    default_strands_tools = [t for t in default_strands_tools if t in STRANDS_TOOLS]
+    default_skills = [
+        skill_name for skill_name in default_skills if skill_name in skill_options
+    ]
+    default_mcp = [
+        mcp_name for mcp_name in default_mcp if mcp_name in mcp_options
+    ]
+    default_strands_tools = [
+        tool_name for tool_name in default_strands_tools if tool_name in STRANDS_TOOLS
+    ]
     if not default_skills and "skill-creator" in skill_options:
         default_skills = ["skill-creator"]
     if not default_mcp:

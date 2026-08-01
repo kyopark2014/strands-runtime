@@ -139,6 +139,7 @@ class AgentCoreService:
         if "text/event-stream" not in response.get("contentType", ""):
             return
 
+        # Small chunk size (bytes) keeps SSE lines responsive without large buffering.
         for line in response["response"].iter_lines(chunk_size=10):
             line = line.decode("utf-8")
             if line:

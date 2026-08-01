@@ -63,8 +63,9 @@ def _paginate_memory_record_pages(fetch_page, *, initial_next_token: Optional[st
 
 def _client_safe_error(operation: str, exc: Optional[BaseException] = None) -> str:
     """Return a client-facing message without raw exception / IAM detail leakage."""
+    # Log exception class only (no traceback / raw message) for client-safe ops.
     if exc is not None:
-        return f"{operation} failed ({type(exc).__name__})"
+        logger.warning("%s failed: %s", operation, type(exc).__name__)
     return f"{operation} failed"
 
 def load_config():

@@ -539,9 +539,8 @@ def _tokens_by_model_pie_metrics(
     del region
     # Metrics Insights has no bind parameters; only interpolate sanitized ids.
     project_name = _sanitize_metric_dimension(project_name, field="ProjectName")
-    # Bandit B608: CloudWatch Metrics Insights expression (not a DB SQL query).
-    # project_name is regex-validated by _sanitize_metric_dimension above.
-    expression = (  # nosec B608
+    # nosec B608: Metrics Insights (not DB SQL); project_name is regex-sanitized above.
+    expression = (  # nosec B608 — CW Metrics Insights, not SQL injection surface
         f'SELECT SUM(TotalTokens) FROM SCHEMA("{METRIC_NAMESPACE}", '
         f"ProjectName, AgentRuntimeName, ModelId) "
         f"WHERE ProjectName = '{project_name}' "

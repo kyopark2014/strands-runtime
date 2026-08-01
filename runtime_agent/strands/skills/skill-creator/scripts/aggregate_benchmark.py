@@ -87,8 +87,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
         metadata_path = eval_dir / "eval_metadata.json"
         if metadata_path.exists():
             try:
-                with open(metadata_path) as mf:
-                    eval_id = json.load(mf).get("eval_id", eval_idx)
+                with open(metadata_path) as metadata_file:
+                    eval_id = json.load(metadata_file).get("eval_id", eval_idx)
             except (json.JSONDecodeError, OSError):
                 eval_id = eval_idx
         else:
@@ -144,8 +144,8 @@ def load_run_results(benchmark_dir: Path) -> dict:
                 timing_file = run_dir / "timing.json"
                 if result["time_seconds"] == 0.0 and timing_file.exists():
                     try:
-                        with open(timing_file) as tf:
-                            timing_data = json.load(tf)
+                        with open(timing_file) as timing_handle:
+                            timing_data = json.load(timing_handle)
                         result["time_seconds"] = timing_data.get("total_duration_seconds", 0.0)
                         result["tokens"] = timing_data.get("total_tokens", 0)
                     except json.JSONDecodeError:
@@ -367,13 +367,13 @@ def main():
     output_json = args.output or (args.benchmark_dir / "benchmark.json")
     output_md = output_json.with_suffix(".md")
 
-    with open(output_json, "w") as f:
-        json.dump(benchmark, f, indent=2)
+    with open(output_json, "w") as json_out:
+        json.dump(benchmark, json_out, indent=2)
     print(f"Generated: {output_json}")
 
     markdown = generate_markdown(benchmark)
-    with open(output_md, "w") as f:
-        f.write(markdown)
+    with open(output_md, "w") as markdown_out:
+        markdown_out.write(markdown)
     print(f"Generated: {output_md}")
 
     run_summary = benchmark["run_summary"]

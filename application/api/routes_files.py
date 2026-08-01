@@ -17,7 +17,12 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
 
     try:
         file_name = sanitize_image_filename(file.filename or "pasted.png")
-        file_bytes = await file.read()
+        try:
+            file_bytes = await file.read()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=400, detail="Failed to read uploaded file"
+            ) from exc
         return upload_chat_image(file_bytes, file_name)
     except FileUploadServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

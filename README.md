@@ -5,6 +5,8 @@
 
 ## 주요 구현 
 
+주요 아키텍처 선택의 맥락·대안·결과는 [docs/adr/](./docs/adr/)에 ADR로 기록되어 있습니다.
+
 ### 전체 Architecture
 
 전체적인 Architecture는 아래와 같습니다. MCP/SKILL를 지원하는 Strands agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)로 배포하고, Amazon ECS에 배포된 Web UI에서 활용합니다. AWS 인프라는 루트 [installer.py](./installer.py)로 배포하고, Strands agent 이미지는 [runtime_agent/strands/Dockerfile](./runtime_agent/strands/Dockerfile)로 빌드한 뒤 [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)로 AgentCore Runtime에 배포합니다. Web UI는 루트 [Dockerfile](./Dockerfile)로 ECS에 배포하며, Agent 추론은 AgentCore에서 수행합니다.
@@ -1327,6 +1329,19 @@ python installer.py --skip-docker-build
 ```
 
 8. 설치가 완료되면 CloudFront로 접속하여 동작을 확인합니다. Agent를 선택한 후에 적절한 MCP tool을 선택하여 원하는 작업을 수행합니다.
+
+#### 배포 후 검증 (Post-deploy verification)
+
+비작성자도 아래 순서로 배포 성공을 확인할 수 있습니다.
+
+1. **installer 완료** — `python installer.py`가 오류 없이 끝났고 `application/config.json`에 `sharing_url`, `agent_runtime_arn`, Cognito 설정이 채워졌는지 확인합니다.
+2. **CloudFront URL** — `application/config.json`의 `sharing_url`을 브라우저에서 열고 로그인 화면이 뜨는지 확인합니다.
+3. **ECS Web UI** — ECS 서비스에 running task가 1개 이상이고 `/api/health`가 200인지 확인합니다.
+   ```bash
+   curl -fsS "$(python3 -c "import json; print(json.load(open('application/config.json'))['sharing_url'].rstrip('/'))")/api/health"
+   ```
+4. **AgentCore Runtime** — `agent_runtime_arn`이 Active인지 확인한 뒤, Web UI에서 New task → 짧은 프롬프트로 SSE 응답이 오는지 확인합니다.
+5. **Observability (선택)** — Runtime installer 후처리로 생성된 CloudWatch Dashboard(`strands-runtime-monitoring`) / `aws/spans`에 호출 trace가 쌓이는지 확인합니다.
 
 ### 인프라 삭제
 

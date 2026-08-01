@@ -80,9 +80,12 @@ def load_config(path: str | None = None):
             if os.environ.get("KNOWLEDGE_BASE_ID"):
                 config["knowledge_base_id"] = os.environ["KNOWLEDGE_BASE_ID"]
 
-            sts = boto3.client("sts")
-            response = sts.get_caller_identity()
-            config["accountId"] = response["Account"]
+            try:
+                sts = boto3.client("sts")
+                response = sts.get_caller_identity()
+                config["accountId"] = response["Account"]
+            except Exception as sts_err:
+                logger.error("STS get_caller_identity failed: %s", sts_err)
 
     # Env vars always win for critical RAG settings.
     if os.environ.get("KNOWLEDGE_BASE_ID"):
@@ -140,12 +143,16 @@ config = load_config()
 
 accountId = config.get('accountId')
 if not accountId:
-    sts = boto3.client("sts")
-    response = sts.get_caller_identity()
-    accountId = response["Account"]
-    config['accountId'] = accountId
-    with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+    try:
+        sts = boto3.client("sts")
+        response = sts.get_caller_identity()
+        accountId = response["Account"]
+        config['accountId'] = accountId
+        with open(config_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+    except Exception as sts_err:
+        logger.error("STS get_caller_identity failed at import: %s", sts_err)
+        accountId = None
 
 bedrock_region = config.get('region', 'us-west-2')
 logger.info(f"bedrock_region: {bedrock_region}")

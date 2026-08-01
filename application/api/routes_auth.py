@@ -46,7 +46,7 @@ def _cookie_secure(request: Request) -> bool:
         if parsed.scheme == "https" and (parsed.hostname or "").lower() == host:
             return True
     except Exception:
-        pass
+        logger.warning("Failed to parse sharing_url for HTTPS check", exc_info=True)
     return False
 
 

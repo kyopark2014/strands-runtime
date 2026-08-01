@@ -56,6 +56,7 @@ def memory_search(query: str, max_results: int = 5, min_score: float = 0.0) -> s
         if not any(token in content_lower for token in query_tokens):
             continue
 
+        # Chunk size (lines) for keyword scoring — small windows keep matches local.
         window_size = 5
         for i in range(0, len(lines), window_size):
             chunk_lines = lines[i:i + window_size]

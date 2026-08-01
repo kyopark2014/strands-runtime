@@ -42,6 +42,7 @@ BORDER_WIDTH = 2
 FONT_SIZE_RATIO = 0.10
 LABEL_PADDING_RATIO = 0.4
 SUBPROCESS_MAX_ATTEMPTS = 3
+# Base delay (seconds) for exponential backoff between LibreOffice subprocess retries.
 SUBPROCESS_RETRY_BASE_DELAY_SECONDS = 0.5
 
 
