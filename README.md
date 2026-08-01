@@ -1589,6 +1589,8 @@ Web UI 로그인은 **Amazon Cognito USER_PASSWORD_AUTH**를 사용합니다. in
 
 기본 ALB behavior(앱 API·SPA)에는 TrustedKeyGroups를 걸지 않습니다.
 
+Web UI는 uvicorn `--no-server-header`로 기동하고, CloudFront custom ResponseHeadersPolicy가 origin `Server`/`X-Powered-By`를 제거합니다.
+
 ### ALB stickiness cookies
 
 타겟 그룹 stickiness는 **application cookie**(`agent_user_id`)를 사용합니다.  
