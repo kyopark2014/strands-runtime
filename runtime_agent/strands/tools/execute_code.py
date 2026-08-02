@@ -15,12 +15,8 @@ import requests as _requests
 
 from strands import tool
 
-from tools.workspace import (
-    WORKING_DIR,
-    REPO_ROOT,
-    ARTIFACTS_DIR,
-    ARTIFACTS_REL,
-)
+import tools.workspace as workspace
+from tools.workspace import WORKING_DIR, REPO_ROOT, ARTIFACTS_REL
 
 logger = logging.getLogger("strands-agent")
 
@@ -45,7 +41,7 @@ def _validate_executable_code(code: str) -> str | None:
 
 
 def _artifact_files_mtime_snapshot() -> dict:
-    """Relative path from ARTIFACTS_DIR -> mtime."""
+    """Relative path from workspace.ARTIFACTS_DIR -> mtime."""
     snap = {}
     if not os.path.isdir(ARTIFACTS_DIR):
         return snap
@@ -53,7 +49,7 @@ def _artifact_files_mtime_snapshot() -> dict:
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             try:
-                rel = os.path.relpath(full, ARTIFACTS_DIR)
+                rel = os.path.relpath(full, workspace.ARTIFACTS_DIR)
                 snap[rel] = os.path.getmtime(full)
             except OSError:
                 pass
@@ -71,7 +67,7 @@ def _touched_artifact_paths(before: dict, after: dict) -> list:
 
 def _paths_for_ui(relative_paths: list) -> list:
     """Absolute path for Streamlit st.image."""
-    return [os.path.abspath(os.path.join(ARTIFACTS_DIR, rel)) for rel in relative_paths]
+    return [os.path.abspath(os.path.join(workspace.ARTIFACTS_DIR, rel)) for rel in relative_paths]
 
 
 def _ensure_matplotlib_runtime():
@@ -136,7 +132,7 @@ _exec_globals = {
     "requests": _requests,
     "WORKING_DIR": WORKING_DIR,
     "REPO_ROOT": REPO_ROOT,
-    "ARTIFACTS_DIR": ARTIFACTS_DIR,
+    "ARTIFACTS_DIR": workspace.ARTIFACTS_DIR,
     "ARTIFACTS_REL": ARTIFACTS_REL,
 }
 
@@ -172,7 +168,8 @@ def execute_code(code: str) -> str:
     if validation_error:
         return validation_error
 
-    os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+    os.makedirs(workspace.ARTIFACTS_DIR, exist_ok=True)
+    _exec_globals["ARTIFACTS_DIR"] = workspace.ARTIFACTS_DIR
     before_files = _artifact_files_mtime_snapshot()
 
     old_cwd = os.getcwd()
@@ -185,7 +182,7 @@ def execute_code(code: str) -> str:
         sys.stdout, sys.stderr = stdout_capture, stderr_capture
 
         _ensure_matplotlib_runtime()
-        # Intentional sandboxed Python tool: cwd pinned to ARTIFACTS_DIR, I/O
+        # Intentional sandboxed Python tool: cwd pinned to workspace.ARTIFACTS_DIR, I/O
         # captured, size/null validated above. Not for untrusted multi-tenant use.
         exec(code, _exec_globals)  # nosec B102  # nosemgrep: python.lang.security.audit.exec-detected.exec-detected
 
@@ -213,7 +210,7 @@ def execute_code(code: str) -> str:
         other_rels = [rel_path for rel_path in touched if rel_path not in artifact_rels]
         if other_rels:
             lines = "\n".join(
-                os.path.abspath(os.path.join(ARTIFACTS_DIR, rel_path))
+                os.path.abspath(os.path.join(workspace.ARTIFACTS_DIR, rel_path))
                 for rel_path in other_rels
             )
             result += f"\n[artifacts]\n{lines}"

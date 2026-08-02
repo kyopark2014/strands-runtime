@@ -7,6 +7,7 @@ import tools.file_write as file_write
 from tools.s3_upload import upload_file_to_s3, resolve_workspace_path, s3_uri_to_console_url
 from tools.memory_tools import memory_search, memory_get
 from tools.workspace import (
+    set_user_artifacts,
     WORKING_DIR,
     REPO_ROOT,
     SKILLS_DIR,
@@ -31,6 +32,7 @@ __all__ = [
     "REPO_ROOT",
     "SKILLS_DIR",
     "ARTIFACTS_DIR",
+    "set_user_artifacts",
     "ARTIFACTS_REL",
 ]
 

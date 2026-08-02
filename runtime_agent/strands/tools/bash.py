@@ -1,9 +1,9 @@
-"""Agent bash tool — runs commands under ARTIFACTS_DIR.
+"""Agent bash tool — runs commands under workspace.ARTIFACTS_DIR.
 
 Threat model / shell=True rationale:
   This tool is intentionally a general shell for the agent (pipes, redirects,
   &&/||, globs). shell=False + shlex.split cannot express that surface.
-  Mitigations: cwd fixed to ARTIFACTS_DIR, timeout, captured stdout/stderr,
+  Mitigations: cwd fixed to workspace.ARTIFACTS_DIR, timeout, captured stdout/stderr,
   structured OSError handling. Do not expose this tool to untrusted end-users
   without an allowlist or sandbox.
 """
@@ -14,12 +14,8 @@ import subprocess
 
 from strands import tool
 
-from tools.workspace import (
-    WORKING_DIR,
-    REPO_ROOT,
-    ARTIFACTS_DIR,
-    ARTIFACTS_REL,
-)
+import tools.workspace as workspace
+from tools.workspace import WORKING_DIR, REPO_ROOT, ARTIFACTS_REL
 
 logger = logging.getLogger("strands-agent")
 
@@ -55,7 +51,7 @@ def _ensure_cli_scripts_on_path() -> None:
 def bash(command: str) -> str:
     """Execute a bash command from artifacts/ and return the result.
 
-    Working directory is ARTIFACTS_DIR. Save outputs by filename only
+    Working directory is workspace.ARTIFACTS_DIR. Save outputs by filename only
     (e.g. node create_skills_doc.js, output.docx). Skill scripts must use
     $WORKING_DIR/skills/... (not a relative skills/ path).
     """
@@ -65,7 +61,7 @@ def bash(command: str) -> str:
 
     _ensure_cli_scripts_on_path()
     try:
-        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+        os.makedirs(workspace.ARTIFACTS_DIR, exist_ok=True)
     except OSError as e:
         logger.warning("bash: failed to create artifacts dir: %s", e)
         return f"Error: could not create artifacts directory ({type(e).__name__})"
@@ -73,12 +69,12 @@ def bash(command: str) -> str:
         **os.environ,
         "REPO_ROOT": REPO_ROOT,
         "WORKING_DIR": WORKING_DIR,
-        "ARTIFACTS_DIR": ARTIFACTS_DIR,
+        "ARTIFACTS_DIR": workspace.ARTIFACTS_DIR,
         "ARTIFACTS_REL": ARTIFACTS_REL,
     }
     try:
         # Intentional agent shell tool; shell=True required for pipes/redirects/&&/globs.
-        # cwd pinned to ARTIFACTS_DIR, 300s timeout, captured I/O. See module docstring
+        # cwd pinned to workspace.ARTIFACTS_DIR, 300s timeout, captured I/O. See module docstring
         # threat model. Inline suppressions are kept on the exact flagged lines so the
         # scanner honors them (adjacent-line placement is unreliable across tools).
         result = subprocess.run(  # nosec B602  # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
@@ -86,7 +82,7 @@ def bash(command: str) -> str:
             shell=True,  # nosec B602  # nosemgrep: python.lang.security.audit.subprocess-shell-true
             capture_output=True,
             text=True,
-            cwd=ARTIFACTS_DIR,
+            cwd=workspace.ARTIFACTS_DIR,
             timeout=BASH_TIMEOUT_SECONDS,
             env=env,
         )

@@ -1,4 +1,4 @@
-"""file_read wrapper that forces paths into ARTIFACTS_DIR (matches file_write)."""
+"""file_read wrapper that forces paths into workspace.ARTIFACTS_DIR (matches file_write)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from strands.types.tools import ToolResult, ToolUse
 from strands_tools.file_read import TOOL_SPEC as _BASE_TOOL_SPEC
 from strands_tools.file_read import file_read as _strands_file_read
 
-from tools.workspace import ARTIFACTS_DIR, force_artifacts_paths
+import tools.workspace as workspace
+from tools.workspace import force_artifacts_paths
 
 logger = logging.getLogger("strands-agent")
 
@@ -19,13 +20,13 @@ TOOL_SPEC = {
     "description": (
         "Read files under the artifacts directory. Prefer a bare filename "
         "(e.g. report.docx). Paths like application/artifacts/... are remapped "
-        f"onto the artifacts cwd ({ARTIFACTS_DIR})."
+        f"onto the artifacts cwd ({workspace.ARTIFACTS_DIR})."
     ),
 }
 
 
 def file_read(tool: ToolUse, **kwargs: Any) -> ToolResult:
-    """Read a file, remapping path(s) onto ARTIFACTS_DIR before delegating."""
+    """Read a file, remapping path(s) onto workspace.ARTIFACTS_DIR before delegating."""
     tool_input = tool.get("input") or {}
     original = tool_input.get("path", "")
     remapped = force_artifacts_paths(original) if original else original

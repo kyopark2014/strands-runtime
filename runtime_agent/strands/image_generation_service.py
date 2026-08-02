@@ -1,4 +1,5 @@
 """Stable Diffusion 3.5 Large image generation business logic for MCP tools."""
+from tools.workspace import ensure_user_artifacts_dir
 
 from __future__ import annotations
 
@@ -29,7 +30,6 @@ VALID_ASPECT_RATIOS = [
 ]
 MAX_SEED = 4294967294
 WORKING_DIR = os.path.dirname(os.path.abspath(__file__))
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
 
 _bedrock_client = None
 
@@ -120,8 +120,10 @@ def process_generation_result(result: dict, prefix: str = "sd35l") -> dict:
                 paths.append(url)
                 continue
 
-        os.makedirs(ARTIFACTS_DIR, exist_ok=True)
-        local_path = os.path.join(ARTIFACTS_DIR, filename)
+        artifacts_dir = ensure_user_artifacts_dir(
+            (os.environ.get("AGENTCORE_USER_ID") or "").strip() or "default"
+        )
+        local_path = os.path.join(artifacts_dir, filename)
         with open(local_path, "wb") as f:
             f.write(image_bytes)
         paths.append(local_path)

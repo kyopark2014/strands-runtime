@@ -6,7 +6,8 @@ from urllib import parse
 from strands import tool
 
 import utils
-from tools.workspace import WORKING_DIR, ARTIFACTS_DIR
+import tools.workspace as workspace
+from tools.workspace import WORKING_DIR
 
 logger = logging.getLogger("strands-agent")
 
@@ -41,7 +42,7 @@ def resolve_workspace_path(filepath: str) -> str:
             suffix = normalized[len("application/artifacts"):].lstrip("/")
         else:
             suffix = normalized[len("artifacts"):].lstrip("/")
-        return os.path.join(ARTIFACTS_DIR, suffix) if suffix else ARTIFACTS_DIR
+        return os.path.join(workspace.ARTIFACTS_DIR, suffix) if suffix else workspace.ARTIFACTS_DIR
     return os.path.normpath(os.path.join(WORKING_DIR, filepath))
 
 
@@ -106,7 +107,7 @@ def _is_under_workspace(full_path: str) -> bool:
     real = os.path.realpath(full_path)
     roots = (
         os.path.realpath(WORKING_DIR),
-        os.path.realpath(ARTIFACTS_DIR),
+        os.path.realpath(workspace.ARTIFACTS_DIR),
     )
     return any(real == root or real.startswith(root + os.sep) for root in roots)
 

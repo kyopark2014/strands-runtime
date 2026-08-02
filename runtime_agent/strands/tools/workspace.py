@@ -6,7 +6,50 @@ import os
 WORKING_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(WORKING_DIR)
 SKILLS_DIR = os.path.join(WORKING_DIR, "skills")
-ARTIFACTS_DIR = os.path.join(WORKING_DIR, "artifacts")
+
+SESSION_STORAGE_DIR = os.environ.get(
+    "SESSION_STORAGE_DIR",
+    "/mnt/workspace"
+    if os.path.isdir("/mnt/workspace")
+    else os.path.join(WORKING_DIR, ".session_storage"),
+)
+
+
+def sanitize_user_path_segment(user_id: str | None) -> str | None:
+    """Return a safe single path segment for per-user workspace folders, or None."""
+    if not user_id:
+        return None
+    segment = (
+        str(user_id)
+        .strip()
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace("..", "_")
+    )
+    return segment or None
+
+
+def get_user_artifacts_dir(user_id: str | None) -> str:
+    """Absolute path to {SESSION_STORAGE_DIR}/{user_id}/artifacts (does not create)."""
+    segment = sanitize_user_path_segment(user_id) or "default"
+    return os.path.join(SESSION_STORAGE_DIR, segment, "artifacts")
+
+
+def ensure_user_artifacts_dir(user_id: str | None) -> str:
+    """Create {SESSION_STORAGE_DIR}/{user_id}/artifacts if needed and return it."""
+    artifacts_dir = get_user_artifacts_dir(user_id)
+    os.makedirs(artifacts_dir, exist_ok=True)
+    return artifacts_dir
+
+
+def set_user_artifacts(user_id: str | None) -> str:
+    """Point ARTIFACTS_DIR at {SESSION_STORAGE_DIR}/{user_id}/artifacts."""
+    global ARTIFACTS_DIR
+    artifacts_dir = ensure_user_artifacts_dir(user_id)
+    ARTIFACTS_DIR = artifacts_dir
+    return artifacts_dir
+
+ARTIFACTS_DIR = get_user_artifacts_dir("default")
 # Logical alias agents often use in prompts; always resolve to ARTIFACTS_DIR.
 ARTIFACTS_REL = "artifacts"
 
