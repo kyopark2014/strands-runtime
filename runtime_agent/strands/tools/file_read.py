@@ -1,4 +1,4 @@
-"""file_read wrapper that forces paths into workspace.ARTIFACTS_DIR (matches file_write)."""
+"""file_read wrapper that allows artifacts and per-user skills directories."""
 
 from __future__ import annotations
 
@@ -11,25 +11,25 @@ from strands_tools.file_read import TOOL_SPEC as _BASE_TOOL_SPEC
 from strands_tools.file_read import file_read as _strands_file_read
 
 import tools.workspace as workspace
-from tools.workspace import force_artifacts_paths
+from tools.workspace import resolve_agent_file_paths
 
 logger = logging.getLogger("strands-agent")
 
 TOOL_SPEC = {
     **_BASE_TOOL_SPEC,
     "description": (
-        "Read files under the artifacts directory. Prefer a bare filename "
-        "(e.g. report.docx). Paths like application/artifacts/... are remapped "
-        f"onto the artifacts cwd ({workspace.ARTIFACTS_DIR})."
+        "Read files under the artifacts directory or the per-user skills "
+        "directory ($USER_SKILLS_DIR). Prefer a bare filename for artifacts "
+        f"(e.g. report.docx). User skills live under {workspace.USER_SKILLS_DIR}."
     ),
 }
 
 
 def file_read(tool: ToolUse, **kwargs: Any) -> ToolResult:
-    """Read a file, remapping path(s) onto workspace.ARTIFACTS_DIR before delegating."""
+    """Read a file under artifacts or USER_SKILLS_DIR before delegating."""
     tool_input = tool.get("input") or {}
     original = tool_input.get("path", "")
-    remapped = force_artifacts_paths(original) if original else original
+    remapped = resolve_agent_file_paths(original) if original else original
     if remapped != original:
         logger.info("file_read path remapped: %r -> %r", original, remapped)
 

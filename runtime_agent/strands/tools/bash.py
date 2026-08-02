@@ -71,6 +71,8 @@ def bash(command: str) -> str:
         "WORKING_DIR": WORKING_DIR,
         "ARTIFACTS_DIR": workspace.ARTIFACTS_DIR,
         "ARTIFACTS_REL": ARTIFACTS_REL,
+        "USER_SKILLS_DIR": workspace.USER_SKILLS_DIR,
+        "SKILLS_DIR": workspace.SKILLS_DIR,
     }
     try:
         # Intentional agent shell tool; shell=True required for pipes/redirects/&&/globs.

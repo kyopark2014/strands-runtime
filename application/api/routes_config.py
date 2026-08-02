@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Request
+import logging
+
+from fastapi import APIRouter, HTTPException, Request
 
 from application.api.routes_auth import get_optional_user_id
 from application.services.config_service import (
@@ -6,6 +8,7 @@ from application.services.config_service import (
     get_public_config,
 )
 
+logger = logging.getLogger("routes_config")
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 
@@ -16,6 +19,13 @@ def get_config(request: Request):
     Unauthenticated clients get only what the login screen needs (project name).
     Model / MCP / skill / strands catalogs require a session.
     """
-    if not get_optional_user_id(request):
-        return get_public_config()
-    return get_application_config()
+    try:
+        user_id = get_optional_user_id(request)
+        if not user_id:
+            return get_public_config()
+        return get_application_config(user_id)
+    except Exception:
+        logger.exception("Failed to load application config")
+        raise HTTPException(
+            status_code=500, detail="Failed to load application config"
+        ) from None

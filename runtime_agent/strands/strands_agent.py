@@ -39,10 +39,12 @@ from tools import (
     SKILLS_DIR,
     WORKING_DIR,
     bash,
+    ensure_user_skills_dir,
     execute_code,
     file_read,
     file_write,
     get_builtin_tools,
+    get_user_skills_dir,
     memory_get,
     memory_search,
     resolve_workspace_path,
@@ -95,26 +97,51 @@ BASE_SYSTEM_PROMPT = (
 )
 
 
-def available_skills() -> list[dict]:
-    """Return name/description for skills under SKILLS_DIR (for UI selection)."""
-    result = []
-    if not os.path.isdir(SKILLS_DIR):
+def _skill_root_dirs() -> list[str]:
+    """Builtin skills dir plus the current user's skills dir (if present)."""
+    roots = [SKILLS_DIR]
+    user_dir = get_user_skills_dir(getattr(chat, "user_id", None))
+    if user_dir and os.path.isdir(user_dir) and os.path.normpath(user_dir) not in {
+        os.path.normpath(r) for r in roots
+    }:
+        roots.append(user_dir)
+    return roots
+
+
+def _iter_skill_entries(skills_root: str) -> list[tuple[str, str]]:
+    """Return (entry_name, skill_dir) pairs that contain SKILL.md."""
+    result: list[tuple[str, str]] = []
+    if not os.path.isdir(skills_root):
         return result
     try:
-        entries = sorted(os.listdir(SKILLS_DIR))
+        entries = sorted(os.listdir(skills_root))
     except OSError as e:
-        logger.warning("Failed to list skills directory: %s", e)
+        logger.warning("Failed to list skills directory %s: %s", skills_root, e)
         return result
     for entry in entries:
-        skill_dir = os.path.join(SKILLS_DIR, entry)
-        skill_md = os.path.join(skill_dir, "SKILL.md")
-        if os.path.isfile(skill_md):
+        skill_dir = os.path.join(skills_root, entry)
+        if os.path.isfile(os.path.join(skill_dir, "SKILL.md")):
+            result.append((entry, skill_dir))
+    return result
+
+
+def available_skills() -> list[dict]:
+    """Return name/description for skills under builtin + user skill dirs."""
+    result = []
+    seen: set[str] = set()
+    for skills_root in _skill_root_dirs():
+        for entry, skill_dir in _iter_skill_entries(skills_root):
             try:
                 loaded = Skill.from_file(skill_dir)
+                key = loaded.name or entry
+                if key in seen:
+                    continue
+                seen.add(key)
                 result.append({
                     "name": loaded.name,
                     "description": loaded.description,
                     "dir": entry,
+                    "path": skill_dir,
                 })
             except Exception as e:
                 logger.warning(f"Failed to load skill '{entry}': {e}")
@@ -122,29 +149,23 @@ def available_skills() -> list[dict]:
 
 
 def resolve_skill_dir(skill_key: str) -> Optional[str]:
-    """Map skill name (SKILL.md frontmatter) or directory name to skill path."""
-    if not skill_key or not os.path.isdir(SKILLS_DIR):
+    """Map skill name (SKILL.md frontmatter) or directory name to skill path.
+
+    Searches builtin ``SKILLS_DIR`` first, then the per-user skills directory.
+    """
+    if not skill_key:
         return None
 
-    try:
-        entries = sorted(os.listdir(SKILLS_DIR))
-    except OSError as e:
-        logger.warning("Failed to list skills directory: %s", e)
-        return None
-
-    for entry in entries:
-        skill_dir = os.path.join(SKILLS_DIR, entry)
-        skill_md = os.path.join(skill_dir, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        if entry == skill_key:
-            return skill_dir
-        try:
-            loaded = Skill.from_file(skill_dir)
-            if loaded.name == skill_key:
+    for skills_root in _skill_root_dirs():
+        for entry, skill_dir in _iter_skill_entries(skills_root):
+            if entry == skill_key:
                 return skill_dir
-        except Exception as e:
-            logger.warning(f"Failed to load skill '{entry}': {e}")
+            try:
+                loaded = Skill.from_file(skill_dir)
+                if loaded.name == skill_key:
+                    return skill_dir
+            except Exception as e:
+                logger.warning(f"Failed to load skill '{entry}': {e}")
 
     logger.warning(f"Skill directory not found for key: {skill_key}")
     return None
@@ -153,11 +174,53 @@ def resolve_skill_dir(skill_key: str) -> Optional[str]:
 def skill_dirs_from_list(skill_list: list[str]) -> list[str]:
     """Resolve UI/config skill keys to filesystem directories for AgentSkills."""
     dirs: list[str] = []
+    seen: set[str] = set()
     for key in skill_list:
         path = resolve_skill_dir(key)
         if path:
-            dirs.append(path)
+            norm = os.path.normpath(path)
+            if norm not in seen:
+                dirs.append(path)
+                seen.add(norm)
     return dirs
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath(
+            [os.path.normpath(path), os.path.normpath(root)]
+        ) == os.path.normpath(root)
+    except ValueError:
+        return False
+
+
+def agent_skills_sources(skill_list: list[str]) -> list[str]:
+    """Build AgentSkills sources: selected skill dirs + per-user skills folder.
+
+    Selected builtin skills are passed as individual directories. The per-user
+    skills directory (``/mnt/workspace/{user-id}/skills``) is always appended
+    as a parent source so skill-creator output is discoverable.
+    """
+    user_skills_dir = ensure_user_skills_dir(getattr(chat, "user_id", None))
+    sources: list[str] = []
+    seen: set[str] = set()
+
+    for path in skill_dirs_from_list(skill_list):
+        # Parent user-skills dir covers these; skip individuals under it.
+        if _path_is_under(path, user_skills_dir):
+            continue
+        norm = os.path.normpath(path)
+        if norm not in seen:
+            sources.append(path)
+            seen.add(norm)
+
+    if os.path.isdir(user_skills_dir):
+        norm_user = os.path.normpath(user_skills_dir)
+        if norm_user not in seen:
+            sources.append(user_skills_dir)
+            seen.add(norm_user)
+
+    return sources
 
 
 conversation_manager = SlidingWindowConversationManager(
@@ -264,7 +327,7 @@ def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: l
 
     skills_plugin = None
     if chat.skill_mode == "Enable" and skill_list:
-        skills_sources = skill_dirs_from_list(skill_list)
+        skills_sources = agent_skills_sources(skill_list)
         logger.info(f"skill_list: {skill_list} -> skills_sources: {skills_sources}")
         if skills_sources:
             skills_plugin = AgentSkills(skills=skills_sources)

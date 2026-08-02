@@ -8,12 +8,21 @@ from tools.s3_upload import upload_file_to_s3, resolve_workspace_path, s3_uri_to
 from tools.memory_tools import memory_search, memory_get
 from tools.workspace import (
     set_user_artifacts,
+    set_user_skills,
+    set_user_workspace,
     WORKING_DIR,
     REPO_ROOT,
     SKILLS_DIR,
+    USER_SKILLS_DIR,
     ARTIFACTS_DIR,
     ARTIFACTS_REL,
     force_artifacts_path,
+    resolve_agent_file_path,
+    ensure_user_skills_dir,
+    ensure_user_skills_list,
+    update_user_skills_list,
+    get_user_skills_dir,
+    get_user_skills_list_path,
 )
 
 __all__ = [
@@ -28,11 +37,20 @@ __all__ = [
     "resolve_workspace_path",
     "s3_uri_to_console_url",
     "force_artifacts_path",
+    "resolve_agent_file_path",
     "WORKING_DIR",
     "REPO_ROOT",
     "SKILLS_DIR",
+    "USER_SKILLS_DIR",
     "ARTIFACTS_DIR",
     "set_user_artifacts",
+    "set_user_skills",
+    "set_user_workspace",
+    "ensure_user_skills_dir",
+    "ensure_user_skills_list",
+    "update_user_skills_list",
+    "get_user_skills_dir",
+    "get_user_skills_list_path",
     "ARTIFACTS_REL",
 ]
 

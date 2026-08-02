@@ -1,5 +1,5 @@
 """Chat facade: owns module-level state and re-exports focused submodules."""
-from tools.workspace import set_user_artifacts
+from tools.workspace import set_user_workspace
 
 import utils
 import info
@@ -169,8 +169,9 @@ def update(
         logger.info(f"user_id: {user_id}")
         initiate()
     if userId is not None:
-        # Isolate generated files under {SESSION_STORAGE_DIR}/{user_id}/artifacts
-        set_user_artifacts(user_id)
+        # Isolate artifacts + user skills under {SESSION_STORAGE_DIR}/{user_id}/
+        # and ensure {user_id}/skills.list exists (create if missing).
+        set_user_workspace(user_id)
 
     if modelName is not None and model_name != modelName:
         model_name = modelName
