@@ -176,11 +176,44 @@ def _file_name_from_ref(file_ref: str) -> str:
     return parse.unquote(name)
 
 
-def summarize_image_file(file_name, prompt=""):
+def _s3_key_from_file_ref(file_ref: str, *, default_prefix: str) -> str:
+    """Derive S3 object key from a sharing URL or bare file name.
+
+    Prefer the ``images/{user_id}/...`` (or docs/) path embedded in the URL;
+    otherwise fall back to ``{prefix}/{user_id}/{file_name}``.
+    """
+    import chat
+    from tools.workspace import sanitize_user_path_segment
+
+    raw = (file_ref or "").strip()
+    if not raw:
+        return ""
+
+    raw = raw.split("?", 1)[0].split("#", 1)[0]
+
+    for prefix in (chat.s3_image_prefix, chat.s3_prefix, "images", "docs"):
+        marker = f"/{prefix}/"
+        idx = raw.find(marker)
+        if idx >= 0:
+            return parse.unquote(raw[idx + 1 :])
+        if raw.startswith(f"{prefix}/"):
+            return parse.unquote(raw)
+
+    file_name = _file_name_from_ref(file_ref)
+    if not file_name:
+        return ""
+
+    user_segment = sanitize_user_path_segment(chat.user_id)
+    if user_segment:
+        return f"{default_prefix}/{user_segment}/{file_name}"
+    return f"{default_prefix}/{file_name}"
+
+
+def summarize_image_file(file_ref, prompt=""):
     import chat
 
     s3_client = get_s3_client()
-    s3_key = f"{chat.s3_image_prefix}/{file_name}"
+    s3_key = _s3_key_from_file_ref(file_ref, default_prefix=chat.s3_image_prefix)
     logger.info(f"loading image from s3://{chat.s3_bucket}/{s3_key}")
     try:
         image_obj = s3_client.get_object(Bucket=chat.s3_bucket, Key=s3_key)
@@ -246,7 +279,7 @@ def summarize_document_file(file_name, file_type):
 def get_summary_of_uploaded_file(file_ref, st=None, prompt=""):
     """Analyze an uploaded file (by URL or name) and return a text summary.
 
-    Images are loaded from S3 under images/ and summarized with vision.
+    Images are loaded from S3 under images/{user_id}/ and summarized with vision.
     Documents keep the existing docs/ load path.
     """
     import chat
@@ -261,7 +294,7 @@ def get_summary_of_uploaded_file(file_ref, st=None, prompt=""):
     )
 
     if file_type in IMAGE_FILE_TYPES:
-        return summarize_image_file(file_name, prompt)
+        return summarize_image_file(file_ref, prompt)
 
     msg = "지원하지 않는 파일 형식입니다."
 

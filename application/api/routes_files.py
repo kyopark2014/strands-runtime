@@ -12,8 +12,8 @@ router = APIRouter(prefix="/api/files", tags=["files"])
 
 @router.post("/upload")
 async def upload_file(request: Request, file: UploadFile = File(...)):
-    """Upload an image to S3 (images/) for chat attachment. No Knowledge Base sync."""
-    require_user_id(request)
+    """Upload an image to S3 (images/{user_id}/) for chat attachment. No Knowledge Base sync."""
+    user_id = require_user_id(request)
 
     try:
         file_name = sanitize_image_filename(file.filename or "pasted.png")
@@ -23,6 +23,6 @@ async def upload_file(request: Request, file: UploadFile = File(...)):
             raise HTTPException(
                 status_code=400, detail="Failed to read uploaded file"
             ) from exc
-        return upload_chat_image(file_bytes, file_name)
+        return upload_chat_image(file_bytes, file_name, user_id=user_id)
     except FileUploadServiceError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.detail) from exc

@@ -102,9 +102,10 @@ def updata_object(key, body, direction):
 
 def upload_to_s3(file_bytes, file_name):
     """
-    Upload a file to S3 and return the URL
+    Upload a file to S3 under {prefix}/{user_id}/ and return the URL.
     """
     import chat
+    from tools.workspace import sanitize_user_path_segment
 
     try:
         s3_client = get_s3_client()
@@ -112,10 +113,18 @@ def upload_to_s3(file_bytes, file_name):
         content_type = utils.get_contents_type(file_name)
         logger.info(f"content_type: {content_type}")
 
-        if content_type == "image/jpeg" or content_type == "image/png":
-            s3_key = f"{chat.s3_image_prefix}/{file_name}"
+        if content_type.startswith("image/"):
+            prefix = chat.s3_image_prefix
         else:
-            s3_key = f"{chat.s3_prefix}/{file_name}"
+            prefix = chat.s3_prefix
+
+        user_segment = sanitize_user_path_segment(chat.user_id)
+        if user_segment:
+            s3_key = f"{prefix}/{user_segment}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(user_segment)}/{parse.quote(file_name)}"
+        else:
+            s3_key = f"{prefix}/{file_name}"
+            relative_url_path = f"{prefix}/{parse.quote(file_name)}"
 
         user_meta = {  # user-defined metadata
             "content_type": content_type,
@@ -131,10 +140,8 @@ def upload_to_s3(file_bytes, file_name):
         )
         logger.info(f"upload response: {response}")
 
-        if content_type == "image/jpeg" or content_type == "image/png":
-            url = chat.path + "/" + chat.s3_image_prefix + "/" + parse.quote(file_name)
-        else:
-            url = chat.path + "/" + chat.s3_prefix + "/" + parse.quote(file_name)
+        base = (chat.path or "").rstrip("/")
+        url = f"{base}/{relative_url_path}" if base else relative_url_path
         return url
 
     except Exception as e:
