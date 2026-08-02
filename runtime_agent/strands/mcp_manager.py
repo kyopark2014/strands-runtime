@@ -63,12 +63,18 @@ class MCPClientManager:
             
     def add_stdio_client(self, name: str, command: str, args: List[str], env: dict[str, str] = {}) -> None:
         """Add a new MCP client configuration (lazy initialization)"""
-        self.client_configs[name] = {
+        new_config = {
             "transport": "stdio",
             "command": command,
             "args": args,
             "env": env
         }
+        # Drop cached client when env/command changes so AGENTCORE_USER_ID etc. take effect.
+        old_config = self.client_configs.get(name)
+        if name in self.clients and old_config != new_config:
+            logger.info(f"Invalidating cached MCP client for {name} due to config change")
+            del self.clients[name]
+        self.client_configs[name] = new_config
     
     def add_streamable_client(
         self,
@@ -382,7 +388,11 @@ def init_mcp_clients(mcp_servers: list):
             command = server_config["command"]
             args = server_config["args"]
             env = dict(server_config.get("env") or {})
-            if name in ("memory", "kb-retriever"):
+            # UI may send "knowledge base"; load_config maps it to server_key "kb-retriever".
+            if name in ("memory", "kb-retriever", "knowledge base") or server_key in (
+                "memory",
+                "kb-retriever",
+            ):
                 env["AGENTCORE_USER_ID"] = chat.user_id if chat.user_id else "default"
             logger.info(f"name: {name}, command: {command}, args: {args}, env: {env}")
 
