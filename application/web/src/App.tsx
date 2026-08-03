@@ -25,7 +25,7 @@ import { ChatInput } from "./components/ChatInput";
 import { UserIdModal } from "./components/UserIdModal";
 import { api } from "./api";
 
-type DrawerKind = "skill" | "mcp" | "strands" | "model" | null;
+type DrawerKind = "skill" | "mcp" | "strands" | "model" | "appearance" | null;
 
 type QueuedMessage = {
   id: string;
