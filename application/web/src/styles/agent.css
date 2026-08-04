@@ -1645,6 +1645,15 @@ button.config-popover-choice.is-selected {
   color: var(--text-primary);
 }
 
+.brand-graph-btn.is-disabled {
+  cursor: default;
+}
+
+.brand-graph-btn.is-disabled:hover {
+  background: transparent;
+  color: inherit;
+}
+
 .knowledge-graph-modal {
   padding: 24px 16px;
   z-index: 1100;
