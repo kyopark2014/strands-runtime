@@ -43,13 +43,14 @@ def _validate_executable_code(code: str) -> str | None:
 def _artifact_files_mtime_snapshot() -> dict:
     """Relative path from workspace.ARTIFACTS_DIR -> mtime."""
     snap = {}
-    if not os.path.isdir(ARTIFACTS_DIR):
+    artifacts_dir = workspace.ARTIFACTS_DIR
+    if not os.path.isdir(artifacts_dir):
         return snap
-    for dirpath, _, filenames in os.walk(ARTIFACTS_DIR):
+    for dirpath, _, filenames in os.walk(artifacts_dir):
         for fn in filenames:
             full = os.path.join(dirpath, fn)
             try:
-                rel = os.path.relpath(full, workspace.ARTIFACTS_DIR)
+                rel = os.path.relpath(full, artifacts_dir)
                 snap[rel] = os.path.getmtime(full)
             except OSError:
                 pass
@@ -177,7 +178,7 @@ def execute_code(code: str) -> str:
     stderr_capture = io.StringIO()
 
     try:
-        os.chdir(ARTIFACTS_DIR)
+        os.chdir(workspace.ARTIFACTS_DIR)
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = stdout_capture, stderr_capture
 
