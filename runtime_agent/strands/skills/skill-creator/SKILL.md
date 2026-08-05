@@ -70,10 +70,10 @@ not durable per user).
    `$USER_SKILLS_DIR/my-skill/SKILL.md`, or `bash` with the same absolute path.
    Do **not** write skills into `artifacts/`.
 
-4. After the skill is saved, the next agent load ensures
-   `/mnt/workspace/{user-id}/skills.list` exists (creates it if missing) and
-   appends newly discovered skill names so the UI and AgentSkills see both
-   builtin `skills/` entries and user-created skills.
+4. After the skill is saved, the next agent load / login syncs
+   `/mnt/workspace/{user-id}/skills.list` from builtin `skills/` (or, on the
+   ECS app, `application/skills.list`) plus user-created skills under
+   `$USER_SKILLS_DIR`, so the UI and AgentSkills see both.
 
 ### Capture Intent
 

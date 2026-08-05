@@ -15,8 +15,11 @@ import requests as _requests
 
 from strands import tool
 
+import utils
 import tools.workspace as workspace
 from tools.workspace import WORKING_DIR, REPO_ROOT, ARTIFACTS_REL
+from tools.s3_upload import build_s3_key
+from urllib.parse import quote
 
 logger = logging.getLogger("strands-agent")
 
@@ -27,6 +30,16 @@ _ARTIFACT_EXT = frozenset({
 
 _mpl_runtime_ready = False
 _MAX_CODE_BYTES = 512_000
+
+_KOREAN_TTF_CANDIDATES = (
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+    "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+    "/usr/share/fonts/nanum/NanumGothic.ttf",
+    os.path.join(WORKING_DIR, "assets", "NanumGothic-Regular.ttf"),
+    os.path.join("assets", "NanumGothic-Regular.ttf"),
+    "/Library/Fonts/NanumGothic.ttf",
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+)
 
 
 def _validate_executable_code(code: str) -> str | None:
@@ -66,13 +79,65 @@ def _touched_artifact_paths(before: dict, after: dict) -> list:
     return sorted(touched)
 
 
+def _upload_file_to_project_s3(rel_path: str, full_path: str) -> str:
+    """Upload an artifact file to the project S3 bucket; return the object key."""
+    import boto3
+
+    s3_bucket = utils.get_s3_bucket()
+    if not s3_bucket:
+        raise RuntimeError("S3 bucket is not configured.")
+    if not os.path.isfile(full_path):
+        raise FileNotFoundError(f"File not found: {rel_path} (resolved: {full_path})")
+
+    content_type = utils.get_contents_type(full_path)
+    key = build_s3_key(f"artifacts/{rel_path}", content_type=content_type)
+    region = utils.get_aws_region()
+    s3 = boto3.client("s3", region_name=region)
+    put_params = {"Bucket": s3_bucket, "Key": key}
+    if content_type and content_type != "no info":
+        put_params["ContentType"] = content_type
+    with open(full_path, "rb") as f:
+        put_params["Body"] = f.read()
+        s3.put_object(**put_params)
+    logger.info("uploaded artifact to s3://%s/%s", s3_bucket, key)
+    return key
+
+
+def _ensure_artifacts_uploaded(relative_paths: list) -> None:
+    """Push newly created artifact files to project S3 when sharing_url is set."""
+    sharing_url = utils.get_sharing_url()
+    if not sharing_url or not utils.get_s3_bucket():
+        return
+    for rel in relative_paths:
+        try:
+            full = os.path.abspath(os.path.join(workspace.ARTIFACTS_DIR, rel))
+            if not os.path.isfile(full):
+                logger.warning("skip S3 upload; local artifact missing: %s", rel)
+                continue
+            _upload_file_to_project_s3(str(rel), full)
+        except Exception as e:
+            logger.warning("auto-upload failed for %s: %s", rel, e)
+
+
 def _paths_for_ui(relative_paths: list) -> list:
-    """Absolute path for Streamlit st.image."""
+    """Return public URLs if sharing_url is set, otherwise absolute local paths.
+
+    When sharing_url is set, local artifacts are uploaded to the project S3
+    bucket first so CloudFront keys actually exist.
+    """
+    sharing_url = utils.get_sharing_url()
+    if sharing_url:
+        _ensure_artifacts_uploaded(relative_paths)
+        out = []
+        for rel in relative_paths:
+            key = build_s3_key(f"artifacts/{rel}")
+            out.append(f"{sharing_url}/{quote(key)}")
+        return out
     return [os.path.abspath(os.path.join(workspace.ARTIFACTS_DIR, rel)) for rel in relative_paths]
 
 
 def _ensure_matplotlib_runtime():
-    """Use non-interactive Agg backend, prefer CJK-capable fonts, silence headless/show noise."""
+    """Use non-interactive Agg backend, register a Hangul TTF, silence headless noise."""
     global _mpl_runtime_ready
     if _mpl_runtime_ready:
         return
@@ -94,21 +159,43 @@ def _ensure_matplotlib_runtime():
             category=UserWarning,
         )
 
-        import matplotlib.font_manager as fm  # noqa: F401
+        import matplotlib.font_manager as fm
         import matplotlib as mpl
 
         mpl.rcParams["axes.unicode_minus"] = False
-        cjk_candidates = (
-            "AppleGothic",
-            "Apple SD Gothic Neo",
-            "Malgun Gothic",
-            "NanumGothic",
-            "NanumBarunGothic",
-            "Noto Sans CJK KR",
-            "Noto Sans KR",
+
+        registered_name = None
+        for path in _KOREAN_TTF_CANDIDATES:
+            if not os.path.isfile(path):
+                continue
+            try:
+                fm.fontManager.addfont(path)
+                registered_name = fm.FontProperties(fname=path).get_name()
+                logger.info(
+                    "matplotlib Korean font registered: %s (%s)",
+                    registered_name,
+                    path,
+                )
+                break
+            except Exception as e:
+                logger.info("matplotlib font add failed for %s: %s", path, e)
+
+        cjk_candidates = []
+        if registered_name:
+            cjk_candidates.append(registered_name)
+        cjk_candidates.extend(
+            [
+                "NanumGothic",
+                "NanumBarunGothic",
+                "AppleGothic",
+                "Apple SD Gothic Neo",
+                "Malgun Gothic",
+                "Noto Sans CJK KR",
+                "Noto Sans KR",
+            ]
         )
         mpl.rcParams["font.family"] = "sans-serif"
-        mpl.rcParams["font.sans-serif"] = list(cjk_candidates) + ["DejaVu Sans", "sans-serif"]
+        mpl.rcParams["font.sans-serif"] = cjk_candidates + ["DejaVu Sans", "sans-serif"]
 
         _mpl_runtime_ready = True
     except Exception as e:
@@ -156,6 +243,10 @@ def execute_code(code: str) -> str:
     - WORKING_DIR: absolute path to the strands/application runtime root
     - ARTIFACTS_DIR: absolute path to artifacts/
     - ARTIFACTS_REL: workspace-relative path "artifacts"
+
+    Matplotlib: Korean fonts are configured automatically (NanumGothic). Do NOT set
+    font.family to AppleGothic/Malgun Gothic — those are missing in the AgentCore
+    Linux image and will break Hangul glyphs (□ tofu boxes).
 
     Args:
         code: Python code to execute.

@@ -8,12 +8,15 @@ import os
 from typing import Dict, List, cast
 
 import matplotlib.dates as mdates
+import matplotlib.font_manager as fm
 import matplotlib.pyplot as plt
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 
 logger = logging.getLogger("loader")
+
+script_dir = os.path.dirname(os.path.abspath(__file__))
 
 CHART_Y_AXIS_LOWER_SCALE = 0.98
 CHART_Y_AXIS_UPPER_SCALE = 1.02
@@ -22,25 +25,56 @@ CHART_Y_AXIS_PADDING_KRW = 200
 
 
 def _configure_korean_font() -> None:
-    """Best-effort Korean font selection for matplotlib labels."""
-    try:
-        korean_fonts = ['AppleGothic', 'NanumGothic', 'Malgun Gothic', 'Apple SD Gothic Neo']
-        font_found = False
-        for font_name in korean_fonts:
-            try:
-                plt.rcParams['font.family'] = font_name
-                plt.rcParams['axes.unicode_minus'] = False
-                font_found = True
-                logger.info(f"Korean font set to: {font_name}")
-                break
-            except Exception:
-                continue
-        if not font_found:
-            plt.rcParams['axes.unicode_minus'] = False
-            logger.warning("Could not set Korean font, using default font")
-    except Exception as exc:
-        logger.warning(f"Font setting failed: {exc}, continuing with default font")
-        plt.rcParams['axes.unicode_minus'] = False
+    """Register an installed Hangul TTF for stock charts.
+
+    Prefer ``addfont`` on known Nanum paths (fonts-nanum package). Setting
+    ``font.family = 'AppleGothic'`` never raises when missing on Linux.
+    """
+    plt.rcParams["axes.unicode_minus"] = False
+
+    ttf_candidates = (
+        "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",
+        "/usr/share/fonts/truetype/nanum/NanumBarunGothic.ttf",
+        "/usr/share/fonts/nanum/NanumGothic.ttf",
+        os.path.join(script_dir, "assets", "NanumGothic-Regular.ttf"),
+        "/Library/Fonts/NanumGothic.ttf",
+        "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
+        "/System/Library/Fonts/AppleSDGothicNeo.ttc",
+    )
+    for path in ttf_candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            fm.fontManager.addfont(path)
+            name = fm.FontProperties(fname=path).get_name()
+            plt.rcParams["font.family"] = name
+            plt.rcParams["font.sans-serif"] = [
+                name,
+                "NanumGothic",
+                "Nanum Gothic",
+                "AppleGothic",
+                "DejaVu Sans",
+                "sans-serif",
+            ]
+            logger.info("Korean font set to: %s (%s)", name, path)
+            return
+        except Exception as exc:
+            logger.info("font add failed for %s: %s", path, exc)
+
+    korean_fonts = [
+        "NanumGothic",
+        "Nanum Gothic",
+        "NanumBarunGothic",
+        "AppleGothic",
+        "Apple SD Gothic Neo",
+        "Malgun Gothic",
+    ]
+    for font_name in korean_fonts:
+        if any(f.name == font_name for f in fm.fontManager.ttflist):
+            plt.rcParams["font.family"] = font_name
+            logger.info("Korean font set to: %s", font_name)
+            return
+    logger.warning("Could not set Korean font, using default font")
 
 
 def _prepare_trend_series(points: List[object], *, with_moving_averages: bool = False) -> pd.DataFrame:

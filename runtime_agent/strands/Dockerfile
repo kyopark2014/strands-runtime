@@ -13,7 +13,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libreoffice-calc \
     libreoffice-impress \
     fonts-liberation \
+    # Hangul glyphs for matplotlib / ReportLab in execute_code
+    fonts-nanum \
+    fontconfig \
     tesseract-ocr \
+    && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
