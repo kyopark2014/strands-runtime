@@ -12,7 +12,7 @@
 전체적인 Architecture는 아래와 같습니다. MCP/SKILL를 지원하는 Strands agent를 [AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/what-is-bedrock-agentcore.html)로 배포하고, Amazon ECS에 배포된 Web UI에서 활용합니다. AWS 인프라는 루트 [installer.py](./installer.py)로 배포하고, Strands agent 이미지는 [runtime_agent/strands/Dockerfile](./runtime_agent/strands/Dockerfile)로 빌드한 뒤 [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)로 AgentCore Runtime에 배포합니다. Web UI는 루트 [Dockerfile](./Dockerfile)로 ECS에 배포하며, Agent 추론은 AgentCore에서 수행합니다.
 
 
-<img width="1000" alt="image" src="https://github.com/user-attachments/assets/4df00b2a-0a0c-4015-beb8-60c0b29181bd" />
+<img width="1000" alt="image" src="https://github.com/user-attachments/assets/f850d84d-72f0-44f0-99ad-f2910fc197de" />
 
 AgentCore의 runtime은 배포를 위해 Docker를 이용합니다. 현재(2025.7) 기준으로 arm64와 1GB 이하의 docker image를 지원합니다.
 
