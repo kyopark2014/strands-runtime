@@ -83,8 +83,11 @@ BEDROCK_NON_FILTERABLE_METADATA_KEYS = [
     "AMAZON_BEDROCK_METADATA",
 ]
 
-# S3 Files (AgentCore session storage)
+# S3 Files (Runtime session + ECS app-data)
 S3_FILES_SESSION_PREFIX = "agentcore-sessions/"
+S3_FILES_APP_DATA_PREFIX = "app-data/"
+APP_DATA_MOUNT_PATH = "/mnt/app-data"
+SESSION_STORAGE_MOUNT_PATH = "/mnt/workspace"
 
 # AgentCore Runtime 이름: project_name의 '-' → '_' (예: strands_runtime)
 # agent_runtime_name(project_name)
@@ -190,23 +193,29 @@ VPC (10.20.0.0/16)
     └── Gateway: S3 (ECR 레이어 pull용)
 ```
 
-### 6.5. S3 Files (AgentCore · ECS Session Storage)
+### 6.5. S3 Files (Runtime session + ECS app-data)
 
-VPC 생성 직후 `create_s3_files_session_storage()`가 아래를 **멱등**으로 프로비저닝합니다.
+VPC 생성 직후 session FS(`[5.5]`)와 app-data FS(`[5.6]`)를 **멱등**으로 프로비저닝합니다.
+
+| Prefix | Mount | Client | API |
+|--------|-------|--------|-----|
+| `agentcore-sessions/` | `/mnt/workspace` | Runtime only | `create_s3_files_session_storage()` |
+| `app-data/` | `/mnt/app-data` | ECS only | `create_s3_files_app_data_storage()` |
 
 | 리소스 | 설명 |
 |--------|------|
 | Sync IAM role | `role-s3files-sync-for-{project_name}` — S3 bucket ↔ NFS 동기화 |
-| File system | bucket `storage-for-...`, prefix `agentcore-sessions/` |
-| Mount targets | private subnet마다 1개 (Runtime·ECS와 AZ 정렬) |
-| Access point | 마운트 진입점 (`posix uid/gid: 0/0`) |
-| Client SGs | `agent-runtime-sg` + ECS SG → NFS 2049 |
+| Session FS | prefix `agentcore-sessions/` — skills, artifacts, checkpoints |
+| App-data FS | prefix `app-data/` — `tasks.db`, graph, settings, litellm |
+| Mount targets / Access points | FS별 private subnet + POSIX `uid/gid: 0/0` |
 
-- **AgentCore**: `/mnt/workspace`에 마운트 → 세션/워크스페이스 영속화
-- **ECS**: `/mnt/app-data`에 마운트 → `TASK_DB_MOUNT` / `TASK_DB_PROJECT`로 `tasks.db` 영속화
-- Runtime SG를 Bedrock/AgentCore/Secrets VPC endpoint에 연결 (`_ensure_agent_runtime_vpc_endpoint_access`)
+- **AgentCore**: session FS → `/mnt/workspace`
+- **ECS**: app-data FS → `/mnt/app-data` (`TASK_DB_MOUNT` / graph / settings)
+- 배포 시 `agentcore-sessions/` → `app-data/` 마이그레이션 후 민감 객체(session 쪽 `application-database/`, `litellm/`) 제거
+- Runtime IAM: `app-data/*`·`agentcore-sessions/*` S3 API Deny; UI skills는 S3 API로 `agentcore-sessions/{user}/skills/` 조회
+- Runtime SG를 Bedrock/AgentCore/Secrets VPC endpoint에 연결
 
-`apply_s3_files_config()`가 `application/config.json`에 `s3_files_*`, `agent_runtime_vpc_*` 키를 기록합니다.  
+`apply_s3_files_config()`가 `application/config.json`에 session + app-data `s3_files_*`, `agent_runtime_vpc_*` 키를 기록합니다.  
 `runtime_agent/strands/installer.py`는 access point ARN이 있으면 **`s3FilesAccessPoint` + VPC 모드**, 없으면 managed **`sessionStorage` + PUBLIC** 으로 Runtime을 생성합니다.
 
 ### 7. Application Load Balancer
@@ -294,37 +303,20 @@ VPC·ALB·CloudFront 생성
 #### `get_or_create_alb_origin_header()` / `ensure_alb_listener_origin_protection()`
 Secrets Manager에 오리진 헤더 시크릿을 생성·재사용하고, ALB listener를 default 403 + 헤더 일치 시 forward로 맞춤
 
-#### `create_s3_files_session_storage(vpc_info, s3_bucket_name, *, ecs_sg_id="", ecs_task_role_name="")`
-AgentCore·ECS용 S3 Files 세션 스토리지 프로비저닝 (멱등).
+#### `create_s3_files_session_storage(vpc_info, s3_bucket_name)`
+Runtime 전용 S3 Files (`agentcore-sessions/`) 프로비저닝 (멱등).
 
-```python
-def create_s3_files_session_storage(
-    vpc_info: Dict[str, str],
-    s3_bucket_name: str,
-    *,
-    ecs_sg_id: str = "",
-    ecs_task_role_name: str = "",
-) -> Dict[str, object]:
-    # sync role / file system / access point / mount targets
-    # agent-runtime-sg + ECS SG + NFS SG
-    # ensure_ecs_task_s3files_policy + VPC endpoint SG
-    return {
-        "file_system_id": "...",
-        "file_system_arn": "...",
-        "access_point_arn": "...",
-        "subnets": [...],
-        "security_groups": [...],
-    }
-```
+#### `create_s3_files_app_data_storage(vpc_info, s3_bucket_name, ...)`
+ECS 전용 S3 Files (`app-data/`) 프로비저닝 + 마이그레이션 + ECS IAM/FS policy.
 
-#### `apply_s3_files_config(app_config, s3_files_info)`
-S3 Files·VPC 키를 `application/config.json`에 병합
+#### `apply_s3_files_config(app_config, s3_files_info, s3_files_app_data_info=None)`
+session + app-data S3 Files·VPC 키를 `application/config.json`에 병합
 
 #### `create_ecr_repository()` / `build_and_push_docker_image()`
 ECR 생성, ARM64 Docker buildx 빌드·push (타임스탬프 태그 → `latest` promote)
 
 #### `deploy_ecs_service(..., s3_files_info=None)`
-ECS Fargate 배포 (S3 Files 볼륨 `/mnt/app-data`, stickiness, `/api/health`)
+ECS Fargate 배포 (**app-data** S3 Files 볼륨 `/mnt/app-data`, stickiness, `/api/health`)
 
 #### `get_or_create_agentcore_websearch_gateway()`
 AgentCore Web Search gateway 및 managed web-search 타겟 생성/조회
@@ -429,11 +421,11 @@ python installer.py --verify-deployment
        • VPC, 서브넷, IGW, NAT, ALB/ECS SG
        • VPC 엔드포인트 (Bedrock, ECR, Logs, Secrets, AgentCore, S3)
        ↓
-[5.5/10] S3 Files 세션 스토리지
-       • sync role, file system, mount targets, access point
-       • agent-runtime-sg / ECS SG / s3files-mount-sg
+[5.5/10] S3 Files session storage (Runtime / agentcore-sessions/)
        ↓
-[5.6/10] ALB origin header (Secrets Manager 랜덤 생성·재사용)
+[5.6/10] S3 Files app-data storage (ECS / app-data/) + migration
+       ↓
+[5.7/10] ALB origin header (Secrets Manager 랜덤 생성·재사용)
        ↓
 [6/10] Application Load Balancer (idle timeout 120초)
        ↓
@@ -516,8 +508,11 @@ Total deployment time: XX.XX minutes
 | `vector_bucket_name`, `vector_bucket_arn` | S3 Vectors 버킷 |
 | `vector_index_name`, `vector_index_arn` | S3 Vectors 인덱스 |
 | `s3_bucket`, `s3_arn` | 문서·세션 저장 S3 버킷 |
-| `s3_files_file_system_id` | S3 Files file system ID |
-| `s3_files_access_point_arn` | S3 Files access point ARN |
+| `s3_files_file_system_id` | Session S3 Files file system ID |
+| `s3_files_access_point_arn` | Session S3 Files access point ARN |
+| `s3_files_app_data_file_system_id` | App-data S3 Files file system ID |
+| `s3_files_app_data_access_point_arn` | App-data S3 Files access point ARN |
+| `s3_files_app_data_mount_path` | ECS mount path (`/mnt/app-data`) |
 | `agent_runtime_vpc_subnets` | AgentCore Runtime VPC subnet ID 목록 |
 | `agent_runtime_security_groups` | AgentCore Runtime security group ID 목록 |
 | `sharing_url` | CloudFront URL |

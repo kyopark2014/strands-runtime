@@ -4,10 +4,10 @@
 
 관련 코드:
 
-- 인프라 생성: [installer.py](./installer.py) — `create_s3_files_session_storage()`
+- 인프라 생성: [installer.py](./installer.py) — `create_s3_files_session_storage()` (Runtime) + `create_s3_files_app_data_storage()` (ECS)
 - Runtime 연결: [runtime_agent/strands/installer.py](./runtime_agent/strands/installer.py)
 - 세션 저장: [runtime_agent/strands/strands_agent.py](./runtime_agent/strands/strands_agent.py)
-- 삭제: [uninstaller.py](./uninstaller.py) — `delete_s3_files_session_storage()`
+- 삭제: [uninstaller.py](./uninstaller.py) — `delete_s3_files_session_storage()` (session + app-data FS)
 
 ---
 

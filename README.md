@@ -421,13 +421,13 @@ S3 Files(NFS) 위에서 SQLite를 직접 read/write하면 lock·corruption 위�
 | **Working** | `application/data/tasks.db` — 실행 중 SQLite I/O (로컬 디스크) |
 | **Persistent** | `/mnt/app-data/application-database/{projectName}/tasks.db` — S3 Files 마운트 (ECS Fargate) |
 
-S3 bucket 실제 객체 경로 (file system prefix `agentcore-sessions/`):
+S3 bucket 실제 객체 경로 (별도 S3 Files prefix `app-data/`):
 
 ```text
-s3://storage-for-{project}-{account}-{region}/agentcore-sessions/application-database/{projectName}/tasks.db
+s3://storage-for-{project}-{account}-{region}/app-data/application-database/{projectName}/tasks.db
 ```
 
-Runtime checkpoint(`checkpoints/{runtime_session_id}/`)와 **서브 경로만 분리**하고 동일 S3 Files file system을 재사용합니다.
+Runtime은 `agentcore-sessions/` → `/mnt/workspace`를 쓰고, ECS는 **별도** `app-data/` FS를 `/mnt/app-data`에 마운트합니다. Runtime IAM은 `app-data/*`와 `agentcore-sessions/*`를 Deny합니다.
 
 #### 동작 흐름
 
@@ -450,9 +450,9 @@ Runtime checkpoint(`checkpoints/{runtime_session_id}/`)와 **서브 경로만 �
 
 #### 인프라 (installer.py)
 
-- ECS Fargate task definition에 **`s3filesVolumeConfiguration`** 볼륨 추가
-- ECS task role: `s3files:ClientMount`, `ClientWrite`, `GetAccessPoint`, `ListMountTargets`
-- S3 Files file system policy: Runtime role + **ECS task role**
+- ECS Fargate task definition에 **app-data** `s3filesVolumeConfiguration` 볼륨 추가
+- ECS task role: app-data FS에 대한 `s3files:ClientMount`, `ClientWrite`, `GetAccessPoint`, `ListMountTargets`
+- S3 Files file system policy: **app-data FS = ECS only**, session FS = Runtime only
 - ECS SG ↔ S3 Files mount SG: NFS **TCP 2049**
 - 배포: `minimumHealthyPercent=0`, `maximumPercent=100` (롤링 배포 중 DB 동시 write 방지)
 
@@ -480,7 +480,7 @@ python installer.py
 
 1. CloudFront에서 태스크 생성·채팅 후 ECS 서비스 재배포
 2. 재배포 후 동일 Cognito 사용자로 태스크·메시지 목록 유지
-3. S3 bucket: `agentcore-sessions/application-database/{projectName}/tasks.db` 객체 존재
+3. S3 bucket: `app-data/application-database/{projectName}/tasks.db` 객체 존재
 4. CloudWatch 로그: `Restored task DB from S3 Files` / `Persisted task DB to S3 Files`
 
 ### `runtime_agent/strands/` — Strands Agent (AgentCore Runtime)
@@ -1012,13 +1012,17 @@ AgentCore의 **Managed session storage**(`sessionStorage`)는 Runtime **Version 
 flowchart TB
     subgraph root_installer ["installer.py (루트)"]
         A[create_vpc] --> B[create_s3_files_session_storage]
-        B --> C[apply_s3_files_config → application/config.json]
+        B --> B2[create_s3_files_app_data_storage]
+        B2 --> C[apply_s3_files_config → application/config.json]
     end
 
     subgraph s3files_aws ["S3 Files (AWS)"]
-        D[S3 bucket / agentcore-sessions/]
-        E[File System + Mount Targets]
-        F[Access Point]
+        D[S3 agentcore-sessions/ → Runtime]
+        D2[S3 app-data/ → ECS]
+        E[Session FS + Mount Targets]
+        E2[App-data FS + Mount Targets]
+        F[Session Access Point]
+        F2[App-data Access Point]
     end
 
     subgraph runtime_installer ["runtime_agent/strands/installer.py"]
@@ -1034,6 +1038,9 @@ flowchart TB
     B --> D
     B --> E
     B --> F
+    B2 --> D2
+    B2 --> E2
+    B2 --> F2
     C --> G
     G --> H
     G --> I
@@ -1043,38 +1050,14 @@ flowchart TB
 
 #### 배포 흐름 (`installer.py`)
 
-루트 installer는 VPC 생성 직후 `[5.5/10] Creating S3 Files session storage` 단계에서 아래 리소스를 **멱등(idempotent)** 으로 생성합니다.
+VPC 생성 직후 session FS(`[5.5]`)와 app-data FS(`[5.6]`)를 **멱등**으로 프로비저닝합니다.
 
-1. **S3 Files sync IAM role** — `_get_or_create_s3files_sync_role()`
-   - 역할명: `role-s3files-sync-for-{project_name}`
-   - Trust principal: `elasticfilesystem.amazonaws.com` (S3 Files는 EFS NFS 레이어 공유)
-   - Inline policy: S3 bucket read/write + EventBridge sync (`DO-NOT-DELETE-S3-Files*`)
-
-2. **S3 Files file system** — `_get_or_create_s3files_file_system()`
-   - 기존 bucket ARN과 일치하는 file system이 있으면 재사용
-   - 없으면 `s3files.create_file_system()` 호출
-   - prefix: `agentcore-sessions/` (`S3_FILES_SESSION_PREFIX`)
-   - status가 `available`이 될 때까지 폴링 (`_wait_for_s3files_status`)
-
-3. **Security groups**
-   - `agent-runtime-sg-for-{project_name}`: AgentCore microVM용
-   - `s3files-mount-sg-for-{project_name}`: mount target용, **TCP 2049** ingress from runtime SG
-   - runtime SG → mount SG로 **egress 2049** 허용
-
-4. **Mount targets** — `_ensure_s3files_mount_targets()`
-   - VPC **private subnet**마다 mount target 생성 (AZ 정렬)
-   - 이미 존재하는 subnet은 건너뜀
-
-5. **Access point** — `_get_or_create_s3files_access_point()`
-   - POSIX `uid/gid: 0/0` (컨테이너 root 실행)
-   - 기존 access point가 있으면 재사용
-
-6. **File system policy** — `_ensure_s3files_file_system_policy()`
-   - AgentCore Runtime 실행 역할(`AmazonBedrockAgentCoreRuntimeRoleFor{project_name}`)에 `s3files:ClientMount` / `ClientWrite` 허용
-   - NFS 클라이언트 쓰기 거부(`Permission denied on /mnt/workspace`) 방지
-
-7. **VPC endpoint 보강** — `_add_security_group_to_vpc_endpoint()`
-   - Bedrock VPC endpoint에 agent runtime SG 추가 (VPC 모드 Runtime의 Bedrock 접근)
+1. **`_get_or_create_s3files_sync_role()`** — S3 ↔ NFS 동기화용 IAM role
+2. **Session FS** — `agentcore-sessions/` prefix, Runtime-only FS policy
+3. **App-data FS** — `app-data/` prefix, ECS-only FS policy + 마이그레이션
+4. **Security groups** — runtime/ECS SG ↔ mount target SG, NFS **TCP 2049**
+5. **Access points** — FS별 POSIX `uid/gid: 0/0`
+6. **VPC endpoints** — Bedrock VPC endpoint에 runtime SG 추가
 
 생성 결과는 `apply_s3_files_config()`로 `application/config.json`에 기록됩니다.
 
@@ -1082,6 +1065,9 @@ flowchart TB
 {
   "s3_files_file_system_id": "fs-xxxxxxxx",
   "s3_files_access_point_arn": "arn:aws:s3files:us-west-2:...:file-system/fs-xxx/access-point/fsap-xxx",
+  "s3_files_app_data_file_system_id": "fs-yyyyyyyy",
+  "s3_files_app_data_access_point_arn": "arn:aws:s3files:.../access-point/...",
+  "s3_files_app_data_mount_path": "/mnt/app-data",
   "agent_runtime_vpc_subnets": ["subnet-aaa", "subnet-bbb"],
   "agent_runtime_security_groups": ["sg-runtime-xxx"]
 }
