@@ -161,6 +161,15 @@ async def _run_agent_strands(payload):
         mcp_servers = list(mcp_servers) + ["memory"]
         logger.info(f"mcp_servers (memory appended): {mcp_servers}")
 
+    # Auto-attach graph memory when Knowledge Graph is on (same path as UI doc search).
+    effective_user_id = user_id if user_id else chat.user_id
+    if (
+        utils.is_knowledge_graph_enabled(effective_user_id)
+        and "graph memory" not in mcp_servers
+    ):
+        mcp_servers = mcp_servers + ["graph memory"]
+        logger.info("knowledge_graph_enabled: appended 'graph memory' MCP server")
+
     if query and chat.guardrail_enabled and not chat.uses_converse_guardrail():
         blocked, blocked_message = chat.check_input_guardrail(query)
         if blocked:

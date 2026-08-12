@@ -183,7 +183,6 @@ def _allowed_source(path: Path, roots: list[Path]) -> Path | None:
     return None
 
 
-
 def _paragraphs(text: str) -> list[str]:
     chunks = re.split(r"\n\s*\n+", text)
     out: list[str] = []
