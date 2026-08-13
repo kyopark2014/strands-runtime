@@ -389,9 +389,10 @@ def init_mcp_clients(mcp_servers: list):
             args = server_config["args"]
             env = dict(server_config.get("env") or {})
             # UI may send "knowledge base"; load_config maps it to server_key "kb-retriever".
-            if name in ("memory", "graph memory", "kb-retriever", "knowledge base") or server_key in (
+            if name in ("memory", "graph memory", "wiki", "kb-retriever", "knowledge base") or server_key in (
                 "memory",
                 "graph memory",
+                "wiki",
                 "kb-retriever",
             ):
                 env["AGENTCORE_USER_ID"] = chat.user_id if chat.user_id else "default"
