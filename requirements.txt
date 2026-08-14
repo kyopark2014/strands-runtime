@@ -42,3 +42,4 @@ reportlab
 nova-act
 sseclient-py
 cryptography
+pymupdf
