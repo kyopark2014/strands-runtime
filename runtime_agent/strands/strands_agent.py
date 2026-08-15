@@ -317,6 +317,35 @@ def get_runtime_session_id() -> str:
     return runtime_session_id
 
 
+def append_tool_guidance_to_prompt(system_prompt: str, mcp_servers: list) -> str:
+    """Append tool-specific usage guidance to the system prompt based on selected MCP servers.
+
+    Add new guidance rules here as MCP servers are introduced.
+    """
+    if not mcp_servers:
+        return system_prompt
+
+    selected = {name.lower() for name in mcp_servers}
+    extras: list[str] = []
+
+    has_wiki = "wiki" in selected
+    has_tavily_or_websearch = bool(selected & {"tavily", "websearch"})
+    if has_wiki and has_tavily_or_websearch:
+        extras.append("recall_wiki와 websearch tool을 이용해 병렬로 조회하세요.")
+
+    if selected & {"aws documentation", "aws document"}:
+        extras.append(
+            "aws와 관련된 내용이 있다면, search_documentation tool을 이용해 필요한 정보를 수집하세요."
+        )
+
+    if not extras:
+        return system_prompt
+
+    logger.info(f"extra prompt: {extras}")
+
+    return system_prompt + "\n" + "\n".join(extras)
+
+
 def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: list[str]):
     """Create Agent with Strands AgentSkills plugin for selected skills."""
     init_mcp_clients(mcp_servers)
@@ -337,9 +366,11 @@ def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: l
         storage_dir="/mnt/workspace",
     )
 
+    system_prompt = append_tool_guidance_to_prompt(BASE_SYSTEM_PROMPT, mcp_servers)
+
     agent = Agent(
         model=model,
-        system_prompt=BASE_SYSTEM_PROMPT,
+        system_prompt=system_prompt,
         tools=tools,
         plugins=[skills_plugin] if skills_plugin else [],
         conversation_manager=conversation_manager,
