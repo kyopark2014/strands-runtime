@@ -78,7 +78,8 @@ def get_application_config(user_id: str | None = None) -> dict[str, Any]:
     skill_options = load_capability_list_from_path(skills_path)
     logger.info("Loaded skills from %s (%d)", skills_path, len(skill_options))
     mcp_options = load_capability_list("mcp.list")
-    default_skills, default_mcp = utils.get_initial_tool_defaults()
+    # Prefer per-user settings.json; fall back to favorite_tools.json.
+    default_skills, default_mcp = utils.get_user_tool_defaults(user_id)
     config = utils.load_config()
     default_strands_tools = (
         config.get("default_strands_tool_selections") or DEFAULT_STRANDS_TOOLS
