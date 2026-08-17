@@ -44,3 +44,4 @@ nova-act
 sseclient-py
 cryptography
 pymupdf
+python-docx

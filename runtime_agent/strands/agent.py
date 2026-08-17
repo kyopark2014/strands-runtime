@@ -215,7 +215,8 @@ async def _run_agent_strands(payload):
                 )
                 summary = "파일 분석 중 오류가 발생했습니다"
             file_summaries.append(
-                f"선택한 파일({file_name})의 내용을 요약하면 아래와 같습니다.\n\n{summary}"
+                f"선택한 파일({file_name})의 내용을 요약하면 아래와 같습니다.\n"
+                f"경로: {file_ref}\n\n{summary}"
             )
         message_content = (message_content + "\n\n" if message_content else "") + "\n\n".join(
             file_summaries
