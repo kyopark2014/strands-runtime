@@ -705,7 +705,7 @@ async def agent_strands(payload):
 ```
 
 
-#### Session Storage
+## Session Storage
 
 AgentCore Runtime에서 context를 관리하려면 **Session Storage**를 사용합니다. 이 프로젝트는 배포 후에도 대화 이력·agent state를 유지하기 위해 **Amazon S3 Files**를 `/mnt/workspace`에 마운트하고, Strands **`FileSessionManager`**가 해당 경로에 세션을 저장합니다. (`s3_files_access_point_arn`이 없으면 managed `sessionStorage` + `PUBLIC` 모드로 fallback합니다.)
 
