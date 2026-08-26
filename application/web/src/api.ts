@@ -16,6 +16,17 @@ export interface RagUploadResult {
   };
 }
 
+export interface RagUploadPresignResult {
+  ok: boolean;
+  file_name: string;
+  s3_key: string;
+  content_type?: string;
+  upload_url: string;
+  headers: Record<string, string>;
+  expires_in?: number;
+  url?: string | null;
+}
+
 export interface FileUploadResult {
   ok: boolean;
   file_name: string;
@@ -102,7 +113,16 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!res.ok) {
     const text = await res.text();
     uiError(`api:${method} ${path} failed`, { status: res.status, body: text });
-    throw new Error(`Request failed (${res.status}). Please try again.`);
+    let message = text || res.statusText;
+    try {
+      const parsed = JSON.parse(text) as { detail?: string | { msg?: string }[] };
+      if (typeof parsed.detail === "string" && parsed.detail) {
+        message = parsed.detail;
+      }
+    } catch {
+      // keep raw text
+    }
+    throw new Error(message || `Request failed (${res.status}). Please try again.`);
   }
   if (res.status === 204) {
     uiLog(`api:${method} ${path} -> 204`);
@@ -171,6 +191,16 @@ export interface WikiRawUploadResult {
   saved: Array<{ name: string; path: string; bytes: number }>;
 }
 
+export interface WikiRawPresignResult {
+  ok: boolean;
+  file_name: string;
+  s3_key: string;
+  content_type?: string;
+  upload_url: string;
+  headers: Record<string, string>;
+  expires_in?: number;
+}
+
 export interface WikiBrowseResult {
   path: string;
   parent: string | null;
@@ -220,35 +250,98 @@ export const api = {
     if (!files.length) {
       throw new Error("업로드할 파일이 없습니다.");
     }
+    // Presigned PUT: browser → S3 directly (avoids ECS/ALB ~80MB body limits).
     uiLog("wiki:raw upload start", { count: files.length });
-    return withUploadRetry(async () => {
-      const form = new FormData();
-      for (const file of files) {
-        form.append("files", file, file.name);
-      }
-      const res = await fetch("/api/wiki/raw", {
+
+    const saved: WikiRawUploadResult["saved"] = [];
+    let wikiDir = "";
+    let rawDir = "";
+
+    for (const file of files) {
+      const presign = await request<WikiRawPresignResult>("/api/wiki/raw/presign", {
         method: "POST",
-        credentials: "include",
-        body: form,
+        body: JSON.stringify({
+          file_name: file.name,
+          size: file.size,
+          content_type: file.type || undefined,
+        }),
       });
-      if (!res.ok) {
-        const text = await res.text();
-        uiError("wiki:raw upload failed", { status: res.status, body: text });
-        let message = text || res.statusText;
-        try {
-          const parsed = JSON.parse(text) as { detail?: string };
-          if (typeof parsed.detail === "string" && parsed.detail) {
-            message = parsed.detail;
-          }
-        } catch {
-          // keep raw text
-        }
-        throw new HttpError(res.status, message);
+      if (!presign.upload_url || !presign.s3_key) {
+        throw new Error("Presign succeeded but no upload URL was returned");
       }
-      const data = (await res.json()) as WikiRawUploadResult;
-      uiLog("wiki:raw upload complete", data);
-      return data;
-    });
+
+      uiLog("wiki:raw put start", {
+        name: presign.file_name,
+        s3_key: presign.s3_key,
+        size: file.size,
+        host: (() => {
+          try {
+            return new URL(presign.upload_url).host;
+          } catch {
+            return "";
+          }
+        })(),
+      });
+
+      const putHeaders = new Headers(presign.headers || {});
+      if (!putHeaders.has("Content-Type")) {
+        putHeaders.set(
+          "Content-Type",
+          presign.content_type || "application/octet-stream",
+        );
+      }
+      let putRes: Response;
+      try {
+        putRes = await fetch(presign.upload_url, {
+          method: "PUT",
+          body: file,
+          headers: putHeaders,
+        });
+      } catch (err) {
+        const detail = err instanceof Error ? err.message : String(err);
+        uiError("wiki:raw put network error", { detail });
+        throw new Error(`S3 직접 업로드 네트워크 오류: ${detail}`);
+      }
+      if (!putRes.ok) {
+        const text = await putRes.text();
+        uiError("wiki:raw put failed", { status: putRes.status, body: text });
+        const codeMatch = text.match(/<Code>([^<]+)<\/Code>/i);
+        const msgMatch = text.match(/<Message>([^<]+)<\/Message>/i);
+        const s3Detail =
+          codeMatch || msgMatch
+            ? [codeMatch?.[1], msgMatch?.[1]].filter(Boolean).join(": ")
+            : "";
+        throw new Error(
+          s3Detail ||
+            text.slice(0, 200) ||
+            putRes.statusText ||
+            `Direct S3 upload failed (HTTP ${putRes.status})`,
+        );
+      }
+
+      const part = await request<WikiRawUploadResult>("/api/wiki/raw/complete", {
+        method: "POST",
+        body: JSON.stringify({
+          file_name: presign.file_name,
+          s3_key: presign.s3_key,
+          size: file.size,
+        }),
+      });
+      wikiDir = part.wiki_dir || wikiDir;
+      rawDir = part.raw_dir || rawDir;
+      if (part.saved?.length) {
+        saved.push(...part.saved);
+      }
+    }
+
+    const data: WikiRawUploadResult = {
+      wiki_dir: wikiDir,
+      raw_dir: rawDir,
+      saved,
+      count: saved.length,
+    };
+    uiLog("wiki:raw upload complete", data);
+    return data;
   },
   browseWikiSources: (path?: string) => {
     const q = path ? `?path=${encodeURIComponent(path)}` : "";
@@ -286,34 +379,86 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
   getMessages: (id: string) =>
     request<{ messages: Message[] }>(`/api/tasks/${id}/messages`),
-  uploadToRag: async (file: File): Promise<RagUploadResult> => {
-    uiLog("rag:upload start", { name: file.name, size: file.size });
-    return withUploadRetry(async () => {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch("/api/rag/upload", {
-        method: "POST",
-        credentials: "include",
-        body: form,
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        uiError("rag:upload failed", { status: res.status, body: text });
-        let message = text || res.statusText;
-        try {
-          const parsed = JSON.parse(text) as { detail?: string };
-          if (typeof parsed.detail === "string" && parsed.detail) {
-            message = parsed.detail;
-          }
-        } catch {
-          // keep raw text
-        }
-        throw new HttpError(res.status, message);
-      }
-      const data = (await res.json()) as RagUploadResult;
-      uiLog("rag:upload complete", data);
-      return data;
+  uploadToRag: async (
+    file: File,
+    options?: { sync?: boolean },
+  ): Promise<RagUploadResult> => {
+    // Presigned PUT: browser → S3 directly (avoids ECS/ALB ~80MB body limits).
+    const sync = options?.sync !== false;
+    uiLog("rag:upload start", { name: file.name, size: file.size, sync });
+
+    const presign = await request<RagUploadPresignResult>("/api/rag/upload/presign", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: file.name,
+        size: file.size,
+        content_type: file.type || undefined,
+      }),
     });
+    if (!presign.upload_url || !presign.s3_key) {
+      throw new Error("Presign succeeded but no upload URL was returned");
+    }
+
+    uiLog("rag:upload put start", {
+      name: presign.file_name,
+      s3_key: presign.s3_key,
+      size: file.size,
+      host: (() => {
+        try {
+          return new URL(presign.upload_url).host;
+        } catch {
+          return "";
+        }
+      })(),
+    });
+
+    const putHeaders = new Headers(presign.headers || {});
+    if (!putHeaders.has("Content-Type")) {
+      putHeaders.set(
+        "Content-Type",
+        presign.content_type || "application/octet-stream",
+      );
+    }
+    let putRes: Response;
+    try {
+      putRes = await fetch(presign.upload_url, {
+        method: "PUT",
+        body: file,
+        headers: putHeaders,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      uiError("rag:upload put network error", { detail });
+      throw new Error(`S3 직접 업로드 네트워크 오류: ${detail}`);
+    }
+    if (!putRes.ok) {
+      const text = await putRes.text();
+      uiError("rag:upload put failed", { status: putRes.status, body: text });
+      const codeMatch = text.match(/<Code>([^<]+)<\/Code>/i);
+      const msgMatch = text.match(/<Message>([^<]+)<\/Message>/i);
+      const s3Detail =
+        codeMatch || msgMatch
+          ? [codeMatch?.[1], msgMatch?.[1]].filter(Boolean).join(": ")
+          : "";
+      throw new Error(
+        s3Detail ||
+          text.slice(0, 200) ||
+          putRes.statusText ||
+          `Direct S3 upload failed (HTTP ${putRes.status})`,
+      );
+    }
+
+    const data = await request<RagUploadResult>("/api/rag/upload/complete", {
+      method: "POST",
+      body: JSON.stringify({
+        file_name: presign.file_name,
+        s3_key: presign.s3_key,
+        size: file.size,
+        sync,
+      }),
+    });
+    uiLog("rag:upload complete", data);
+    return data;
   },
   uploadFile: async (file: File): Promise<FileUploadResult> => {
     uiLog("file:upload start", { name: file.name, size: file.size, type: file.type });
@@ -358,20 +503,45 @@ export const api = {
       name: presign.file_name,
       s3_key: presign.s3_key,
       size: file.size,
+      host: (() => {
+        try {
+          return new URL(presign.upload_url).host;
+        } catch {
+          return "";
+        }
+      })(),
     });
     const putHeaders = new Headers(presign.headers || {});
     if (!putHeaders.has("Content-Type")) {
       putHeaders.set("Content-Type", presign.content_type || "application/octet-stream");
     }
-    const putRes = await fetch(presign.upload_url, {
-      method: "PUT",
-      body: file,
-      headers: putHeaders,
-    });
+    let putRes: Response;
+    try {
+      putRes = await fetch(presign.upload_url, {
+        method: "PUT",
+        body: file,
+        headers: putHeaders,
+      });
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      uiError("file:load put network error", { detail });
+      throw new Error(`S3 직접 업로드 네트워크 오류: ${detail}`);
+    }
     if (!putRes.ok) {
       const text = await putRes.text();
       uiError("file:load put failed", { status: putRes.status, body: text });
-      throw new Error(text || putRes.statusText || "Direct S3 upload failed");
+      const codeMatch = text.match(/<Code>([^<]+)<\/Code>/i);
+      const msgMatch = text.match(/<Message>([^<]+)<\/Message>/i);
+      const s3Detail =
+        codeMatch || msgMatch
+          ? [codeMatch?.[1], msgMatch?.[1]].filter(Boolean).join(": ")
+          : "";
+      throw new Error(
+        s3Detail ||
+          text.slice(0, 200) ||
+          putRes.statusText ||
+          `Direct S3 upload failed (HTTP ${putRes.status})`,
+      );
     }
 
     const data = await request<LoadFileResult>("/api/files/load/complete", {
