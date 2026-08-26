@@ -33,14 +33,14 @@ class IngestRagUploadTests(unittest.TestCase):
     def test_active_job_returns_conflict(self, mock_active) -> None:
         mock_active.return_value = {"ingestionJobId": "job-1"}
         with self.assertRaises(RagServiceError) as ctx:
-            ingest_rag_upload(b"data", "doc.pdf")
+            ingest_rag_upload(b"data", "doc.pdf", "user-1")
         self.assertEqual(ctx.exception.status_code, 409)
 
     @patch("application.services.rag_service.utils.get_active_ingestion_job")
     def test_status_check_failure(self, mock_active) -> None:
         mock_active.side_effect = RuntimeError("kb unavailable")
         with self.assertRaises(RagServiceError) as ctx:
-            ingest_rag_upload(b"data", "doc.pdf")
+            ingest_rag_upload(b"data", "doc.pdf", "user-1")
         self.assertEqual(ctx.exception.status_code, 503)
 
     @patch("application.services.rag_service.utils.sync_data_source")
@@ -50,11 +50,11 @@ class IngestRagUploadTests(unittest.TestCase):
         mock_active.return_value = None
         mock_upload.return_value = {
             "file_name": "doc.pdf",
-            "s3_key": "docs/doc.pdf",
-            "url": "https://example.com/docs/doc.pdf",
+            "s3_key": "docs/user-1/doc.pdf",
+            "url": "https://example.com/docs/user-1/doc.pdf",
         }
         mock_sync.return_value = {"ingestion_job_id": "job-9"}
-        result = ingest_rag_upload(b"data", "doc.pdf")
+        result = ingest_rag_upload(b"data", "doc.pdf", "user-1")
         self.assertTrue(result["ok"])
         self.assertEqual(result["sync"]["ingestion_job_id"], "job-9")
 
@@ -64,7 +64,7 @@ class IngestRagUploadTests(unittest.TestCase):
         mock_active.return_value = None
         mock_upload.return_value = None
         with self.assertRaises(RagServiceError) as ctx:
-            ingest_rag_upload(b"data", "doc.pdf")
+            ingest_rag_upload(b"data", "doc.pdf", "user-1")
         self.assertEqual(ctx.exception.status_code, 500)
 
 
