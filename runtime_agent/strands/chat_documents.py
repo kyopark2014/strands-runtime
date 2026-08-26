@@ -726,7 +726,7 @@ def extract_text(img_base64):
     import chat
 
     multimodal = chat.get_chat(extended_thinking=chat.reasoning_mode)
-    query = "텍스트를 추출해서 markdown 포맷으로 변환하세요. <result> tag를 붙여주세요."
+    query = "텍스트를 추출해서 markdown 포맷으로 변환하세요. 원문의 언어를 그대로 유지하고 번역하지 마세요. <result> tag를 붙여주세요."
 
     messages = [
         HumanMessage(
