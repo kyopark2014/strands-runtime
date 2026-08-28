@@ -605,6 +605,7 @@ export default function App() {
           onMenuClick={() => setSidebarOpen(true)}
           footer={
             <ChatInput
+              syncModel={activeTask?.model_name}
               disabled={!activeTask}
               waiting={activeStream.streaming}
               queuedMessages={activeQueuedMessages}
