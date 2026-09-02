@@ -361,7 +361,7 @@ def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: l
 
     tools = update_tools(strands_tools, mcp_servers)
 
-    model = get_model()
+    model = get_model(session_id=get_runtime_session_id())
 
     skills_plugin = None
     if chat.skill_mode == "Enable" and skill_list:

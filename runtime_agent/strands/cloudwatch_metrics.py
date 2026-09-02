@@ -230,8 +230,12 @@ def _normalize_usage_dict(raw: dict[str, Any]) -> dict[str, int]:
     )
     details = raw.get("input_token_details")
     if isinstance(details, dict):
-        cache_read = cache_read or int(details.get("cache_read") or 0)
-        cache_creation = cache_creation or int(details.get("cache_creation") or 0)
+        cache_read = cache_read or int(
+            details.get("cache_read") or details.get("cached_tokens") or 0
+        )
+        cache_creation = cache_creation or int(
+            details.get("cache_creation") or details.get("cache_write_tokens") or 0
+        )
 
     usage = {
         "input_tokens": input_tokens,

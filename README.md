@@ -878,115 +878,19 @@ SDK 내부에서도 함께 동작하도록 설계되어 있습니다.
 
 ### Prompt Caching
 
-Strands 에이전트는 tool loop마다 동일한 **system prompt + tool schema**를 Bedrock에 다시 보냅니다. Claude/Nova 경로에서는 [Amazon Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)과 Strands SDK의 `CacheConfig` / `cache_tools` / `cache_prompt`를 켜서 이 정적 prefix를 재사용합니다. 구현은 [runtime_agent/strands/strands_agent.py](./runtime_agent/strands/strands_agent.py)의 `get_model()`에 있습니다.
+Strands tool loop마다 반복되는 **system prompt + tool schema**에 [Amazon Bedrock prompt caching](https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html)을 적용합니다.
 
-**대상 모델:** `claude`, `nova` (`openai`/Mantle 경로는 제외)
+- **Claude / Nova**: Strands `CacheConfig` + `cache_tools` + `cache_prompt` (5m TTL)
+- **GPT 5.6+ (Mantle)**: `MantleGPTResponsesModel` explicit mode (30m TTL)
+- **GPT 5.5 이하**: AWS implicit caching (자동, 코드 미적용)
 
-**적용 방식 (Strands `BedrockModel`)**
-
-`get_model()`에서 Claude/Nova용 `BedrockModel`을 만들 때 아래 kwargs를 넘깁니다. SDK가 Converse API `cachePoint`를 주입합니다.
-
-1. **`cache_prompt="default"`** — request format 시점에 system 끝에 cachePoint를 붙입니다. AgentSkills가 skill XML을 system에 주입한 **이후**에 적용되므로, base prompt + skills XML이 함께 캐시됩니다.
-2. **`cache_tools=CacheToolsConfig(type="default", ttl="5m")`** — tool schema cachePoint.
-3. **`cache_config=CacheConfig(strategy=..., ttl="5m")`** — 마지막 user message에 cachePoint를 넣어 tool-loop / multi-turn prefix를 재사용합니다. Claude는 `strategy="auto"`, Nova는 model_id 자동감지 미지원이라 `strategy="anthropic"`.
-4. **관측** — `AgentResult.metrics`의 `cacheReadInputTokens` / `cacheWriteInputTokens`를 로그합니다 (`_log_prompt_cache_usage`).
-
-```python
-# runtime_agent/strands/strands_agent.py
-PROMPT_CACHE_TTL = "5m"
-
-
-def _prompt_cache_kwargs(model_type: str) -> dict:
-    if model_type not in ("claude", "nova"):
-        return {}
-    strategy = "auto" if model_type == "claude" else "anthropic"
-    return {
-        "cache_prompt": "default",
-        "cache_tools": CacheToolsConfig(type="default", ttl=PROMPT_CACHE_TTL),
-        "cache_config": CacheConfig(strategy=strategy, ttl=PROMPT_CACHE_TTL),
-    }
-```
-
-`get_model()`에서의 사용:
-
-```python
-# runtime_agent/strands/strands_agent.py — get_model()
-    prompt_cache_kwargs = _prompt_cache_kwargs(model_type)
-    model = BedrockModel(
-        ...,
-        **prompt_cache_kwargs,
-        **guardrail_kwargs,
-    )
-```
-
-| 항목 | cache 동작 |
-|------|------------|
-| System (`cache_prompt`) | Skills 주입 후 system 끝에 `cachePoint` |
-| Tools (`cache_tools`) | `toolConfig.tools` 끝에 `cachePoint` |
-| Messages (`cache_config`) | 마지막 user message에 `cachePoint` (tool loop 재사용) |
-
-**효과**
-
-- 동일 skill/MCP 구성이면 system prompt와 tool schema가 세션 내 고정이라, **agent tool-loop 2번째 LLM 호출부터** `cacheReadInputTokens`가 발생하기 쉽습니다.
-- TTL은 **5분(`ephemeral`)** 입니다.
-- 모델별 최소 캐시 토큰(대략 1K+) 미만이면 cache write/read가 0일 수 있습니다.
-
-**측정 결과 (`test_prompt_caching.py`)**
-
-실제 Strands Agent + `echo_cache_probe` tool로 **2-step tool loop**(event-loop cycle 2회)를 재현한 측정값입니다.
+상세는 **[prompt-caching.md](./prompt-caching.md)** 참고.
 
 ```bash
 cd runtime_agent/strands
 python test_prompt_caching.py
+python test_prompt_caching.py --model-id openai.gpt-5.6-sol --region us-east-2
 ```
-
-| 항목 | 값 |
-|------|-----|
-| 모델 | `us.anthropic.claude-sonnet-5` (`us-west-2`) |
-| System prompt | 12,181 chars (~padded for cache threshold) |
-| Tools | 1 (`echo_cache_probe`) |
-| Cache kwargs | `cache_prompt` + `cache_tools` + `cache_config(strategy=auto, ttl=5m)` |
-
-| 호출 | input | cache_creation<br>(`cacheWriteInputTokens`) | cache_read<br>(`cacheReadInputTokens`) | output | 해당 호출 hit ratio |
-|------|------:|---------------:|-----------:|-------:|-------------------:|
-| Call 1 (tool 요청) | 2 | **5,466** | 0 | 62 | 0% |
-| Call 2 (tool 결과 반영) | 2 | 78 | **5,466** | 40 | **98.6%** |
-
-**전체 input token 절감률 (2-call tool loop)**
-
-| 지표 | 값 |
-|------|-----|
-| 캐시 없을 때 총 input footprint | **11,014** (= Call1 5,468 + Call2 5,546) |
-| 캐시로 재사용한 토큰 (`cacheReadInputTokens`) | **5,466** |
-| 새로 처리/기록한 토큰 (`input` + `cacheWriteInputTokens`) | 5,548 |
-| **전체 input token 절감률** | **49.6%** |
-
-```text
-reduction_% = sum(cache_read) / sum(input + cache_creation + cache_read)
-            = 5466 / 11014
-            ≈ 49.6%
-```
-
-해석:
-
-- Call 1에서 system + tools + user prefix **5,466 tokens**를 캐시에 기록(`cacheWriteInputTokens`)
-- Call 2에서 동일 prefix **5,466 tokens**를 재사용 → **해당 호출 기준 98.6% hit**
-- **루프 전체(2회 합산)** 로는 입력 토큰의 **약 절반(49.6%)** 을 재사용 (첫 호출은 반드시 write, 두 번째부터 read)
-- tool loop가 N회면 정적 prefix 재사용 비율은 대략 `(N-1)/N`에 가까워집니다 (예: 3회 ≈ 67%, 5회 ≈ 80%)
-- Call 2의 작은 `cacheWriteInputTokens`(78)은 tool result 등 **새로 추가된 suffix**에 대한 추가 캐시 write
-- Bedrock usage에서 uncached `inputTokens`는 작게 보고되고, 실제 prefix 토큰은 `cacheWriteInputTokens` / `cacheReadInputTokens`에 잡힙니다
-
-**확인 방법**
-
-1. 위 스크립트 실행, 또는 Claude로 tool을 2회 이상 쓰는 질의 실행
-2. stdout의 `input token reduction: XX.X%` 또는 로그의 `prompt cache usage: cache_read=... cache_creation=...` 확인
-3. cold start 기준: 첫 cycle `cacheWriteInputTokens > 0`, 이후 cycle `cacheReadInputTokens > 0` (스크립트는 `run_id`로 매 실행 cold write를 강제)
-
-**의도적으로 하지 않은 것**
-
-- deprecated `cache_prompt` 대신 `SystemContentBlock` + `cachePoint`만으로 system 캐시를 구성하는 전면 전환 (AgentSkills가 skill XML을 system에 주입한 뒤 request format 시점에 cachePoint를 붙이는 현재 방식이 더 안전)
-- `cache_config` / `cache_tools`를 openai/Mantle 경로에도 강제 적용
-- skill 본문(`SKILL.md`)을 system에 넣는 구조 변경 (AgentSkills / skills 도구로 로드)
 
 ### S3 Files 활용
 

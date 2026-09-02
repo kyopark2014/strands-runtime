@@ -1,3 +1,17 @@
+# Copyright 2026 Amazon.com, Inc. or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 """Measure Bedrock prompt caching for the Strands Agent path.
 
 Uses the same CacheConfig / cache_tools / cache_prompt helpers as
@@ -11,6 +25,7 @@ Usage:
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -24,11 +39,17 @@ from botocore.config import Config
 from strands import Agent, tool
 from strands.models import BedrockModel
 
+BEDROCK_MAX_RETRY_ATTEMPTS = 8
+BEDROCK_READ_TIMEOUT_SECONDS = 180
+TEST_MAX_TOKENS = 256
+
 import strands_agent as sa
+from model_factory import _build_mantle_openai_model, _supports_gpt_explicit_caching
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_MODEL_ID = "us.anthropic.claude-sonnet-5"
+DEFAULT_GPT_MODEL_ID = "openai.gpt-5.6-sol"
 
 
 @dataclass
@@ -89,12 +110,25 @@ def _load_region() -> str:
 
 def _usage_to_stats(label: str, usage: dict[str, Any] | None) -> CacheStats:
     usage = usage or {}
+    details = usage.get("input_token_details") or usage.get("input_tokens_details") or {}
+    if not isinstance(details, dict):
+        details = {}
     return CacheStats(
         label=label,
         input_tokens=int(usage.get("inputTokens") or usage.get("input_tokens") or 0),
         output_tokens=int(usage.get("outputTokens") or usage.get("output_tokens") or 0),
-        cache_creation=int(usage.get("cacheWriteInputTokens") or 0),
-        cache_read=int(usage.get("cacheReadInputTokens") or 0),
+        cache_creation=int(
+            usage.get("cacheWriteInputTokens")
+            or usage.get("cache_write_tokens")
+            or details.get("cache_write_tokens")
+            or 0
+        ),
+        cache_read=int(
+            usage.get("cacheReadInputTokens")
+            or usage.get("cached_tokens")
+            or details.get("cached_tokens")
+            or 0
+        ),
     )
 
 
@@ -142,14 +176,29 @@ def echo_cache_probe(text: str) -> str:
     return text
 
 
-def _build_model(model_id: str, region: str) -> BedrockModel:
+def _build_model(model_id: str, region: str, run_id: str):
+    if _supports_gpt_explicit_caching("openai", model_id):
+        profile = {
+            "bedrock_region": region,
+            "model_id": model_id,
+            "mantle_api": "responses",
+            "model_type": "openai",
+        }
+        boto_session = boto3.Session(region_name=region)
+        return _build_mantle_openai_model(
+            profile,
+            boto_session,
+            TEST_MAX_TOKENS,
+            session_id=f"probe:{run_id}",
+        )
+
     boto_session = boto3.Session(region_name=region)
-    bedrock_config = Config(retries={"max_attempts": 8}, read_timeout=180)
+    bedrock_config = Config(retries={"max_attempts": BEDROCK_MAX_RETRY_ATTEMPTS}, read_timeout=BEDROCK_READ_TIMEOUT_SECONDS)
     kwargs: dict[str, Any] = {
         "boto_session": boto_session,
         "boto_client_config": bedrock_config,
         "model_id": model_id,
-        "max_tokens": 256,
+        "max_tokens": TEST_MAX_TOKENS,
         **sa._prompt_cache_kwargs("claude"),
     }
     # Claude 5 / fable reject temperature (adaptive thinking path).
@@ -165,23 +214,124 @@ def _build_model(model_id: str, region: str) -> BedrockModel:
     return BedrockModel(**kwargs)
 
 
+# ---------------------------------------------------------------------------
+# Unit tests for the pure metric helpers (no AWS / no model calls required).
+# Run with: pytest test_prompt_caching.py
+# ---------------------------------------------------------------------------
+
+def test_cache_hit_ratio_and_footprint() -> None:
+    stats = CacheStats(
+        label="t",
+        input_tokens=100,
+        output_tokens=10,
+        cache_creation=50,
+        cache_read=150,
+    )
+    # footprint = uncached + cache write + cache read
+    assert stats.billed_input_like == 300
+    assert stats.cache_hit_ratio == 150 / 300
+
+
+def test_cache_hit_ratio_zero_when_no_input() -> None:
+    empty = CacheStats("t", 0, 0, 0, 0)
+    assert empty.billed_input_like == 0
+    assert empty.cache_hit_ratio == 0.0
+
+
+def test_usage_to_stats_supports_both_key_styles() -> None:
+    camel = _usage_to_stats(
+        "c",
+        {
+            "inputTokens": 12,
+            "outputTokens": 3,
+            "cacheWriteInputTokens": 4,
+            "cacheReadInputTokens": 5,
+        },
+    )
+    assert (camel.input_tokens, camel.output_tokens) == (12, 3)
+    assert (camel.cache_creation, camel.cache_read) == (4, 5)
+
+    snake = _usage_to_stats("s", {"input_tokens": 7, "output_tokens": 1})
+    assert snake.input_tokens == 7
+    assert snake.output_tokens == 1
+
+    empty = _usage_to_stats("e", None)
+    assert empty.billed_input_like == 0
+
+
+def test_summarize_token_savings_computes_reduction() -> None:
+    stats_list = [
+        CacheStats("call1", input_tokens=100, output_tokens=0, cache_creation=100, cache_read=0),
+        CacheStats("call2", input_tokens=0, output_tokens=0, cache_creation=0, cache_read=200),
+    ]
+    summary = summarize_token_savings(stats_list)
+    assert summary["calls"] == 2
+    # total footprint = (100+100+0) + (0+0+200) = 400 ; cache_read = 200
+    assert summary["total_input_tokens_without_reuse"] == 400
+    assert summary["tokens_reused_via_cache_read"] == 200
+    assert summary["input_token_reduction_pct"] == 50.0
+
+
+def test_summarize_token_savings_empty_is_safe() -> None:
+    summary = summarize_token_savings([])
+    assert summary["calls"] == 0
+    assert summary["input_token_reduction_pct"] == 0.0
+
+
+def test_extract_cycle_stats_reads_per_cycle_usage() -> None:
+    class _Cycle:
+        def __init__(self, usage: dict[str, Any]) -> None:
+            self.usage = usage
+
+    class _Latest:
+        cycles = [
+            _Cycle({"inputTokens": 10, "cacheReadInputTokens": 5}),
+            _Cycle({"inputTokens": 2, "cacheReadInputTokens": 8}),
+        ]
+
+    class _Metrics:
+        latest_agent_invocation = _Latest()
+
+    class _Result:
+        metrics = _Metrics()
+
+    stats = _extract_cycle_stats(_Result())
+    assert len(stats) == 2
+    assert stats[0].input_tokens == 10
+    assert stats[1].cache_read == 8
+
+
+def test_extract_cycle_stats_without_metrics_returns_empty() -> None:
+    class _NoMetrics:
+        metrics = None
+
+    assert _extract_cycle_stats(_NoMetrics()) == []
+
+
 def main() -> int:
-    region = _load_region()
-    model_id = os.environ.get("PROMPT_CACHE_MODEL_ID", DEFAULT_MODEL_ID)
+    parser = argparse.ArgumentParser(description="Probe Strands prompt caching")
+    parser.add_argument("--model-id", default=os.environ.get("PROMPT_CACHE_MODEL_ID", DEFAULT_MODEL_ID))
+    parser.add_argument("--region", default=None)
+    args = parser.parse_args()
+
+    region = args.region or _load_region()
+    model_id = args.model_id
     run_id = uuid.uuid4().hex[:8]
     system = _padded_system_prompt(run_id)
 
-    model = _build_model(model_id, region)
+    model = _build_model(model_id, region, run_id)
+    cache_mode = "gpt-explicit" if _supports_gpt_explicit_caching("openai", model_id) else "bedrock-converse"
     agent = Agent(
         model=model,
         system_prompt=system,
         tools=[echo_cache_probe],
     )
 
-    print(f"model_id={model_id} region={region} run_id={run_id}")
+    print(f"model_id={model_id} region={region} run_id={run_id} cache_mode={cache_mode}")
     print(f"system_prompt_chars={len(system)}")
     print("tools=1 (echo_cache_probe)")
-    print("cache kwargs:", sa._prompt_cache_kwargs("claude"))
+    if cache_mode == "bedrock-converse":
+        print("cache kwargs:", sa._prompt_cache_kwargs("claude"))
     print("---")
 
     # One agent turn that forces a 2-cycle tool loop (request → tool → final).
