@@ -35,6 +35,11 @@ RUN pip install networkx
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
 RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
 RUN pip install colorama rich defusedxml lxml "markitdown[pptx]" python-pptx pdf2image pytesseract
+RUN pip install python-dotenv
+
+# Strands runtime + graph embedding lib (hybrid wiki search on AgentCore)
+COPY runtime_agent/strands/ .
+COPY graph/lib/ graph/lib/
 
 # Skills that use docx-js / pptxgenjs via bash/node (local install for require())
 # pptx skill also uses react-icons + sharp for icon rasterization
@@ -44,15 +49,15 @@ ENV NODE_PATH=/app/node_modules
 # OpenTelemetry (ADOT + Strands telemetry for AgentCore Evaluations)
 RUN pip install aws-opentelemetry-distro>=0.10.0
 
-COPY . .
-
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
     && chown -R appuser:appuser /app
 
 USER appuser
 
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/graph
+ENV APP_CONFIG_PATH=/app/config.json
 ENV ALLOW_MISSING_RAG_CONFIG=1
+ENV SESSION_STORAGE_DIR=/mnt/workspace
 ENV BYPASS_TOOL_CONSENT=true
 ENV OTEL_PYTHON_DISTRO=aws_distro
 ENV OTEL_PYTHON_CONFIGURATOR=aws_configurator

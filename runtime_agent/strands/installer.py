@@ -38,6 +38,15 @@ def _repo_root() -> str:
     return os.path.normpath(os.path.join(script_dir, "..", ".."))
 
 
+def runtime_build_context() -> str:
+    """Repo root (Dockerfile copies runtime_agent/strands + graph/lib)."""
+    return _repo_root()
+
+
+def runtime_dockerfile() -> str:
+    return os.path.join(runtime_build_context(), "runtime_agent", "strands", "Dockerfile")
+
+
 def get_knowledge_base_name() -> str:
     """Return project_name from repo root installer.py (Bedrock Knowledge Base name)."""
     root_installer_path = os.path.join(_repo_root(), "installer.py")
@@ -1533,14 +1542,17 @@ def setup_arm64_cross_build() -> bool:
 
 def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[str, str] | None = None) -> bool:
     """Build an ARM64 image and push it to ECR."""
+    build_context = runtime_build_context()
+    dockerfile = runtime_dockerfile()
+
     def _with_build_args(base_command: list[str]) -> list[str]:
         command = list(base_command)
         if build_args:
-            dot_index = command.index(".")
+            ctx_index = len(command) - 1
             for key, value in build_args.items():
-                command.insert(dot_index, f"{key}={value}")
-                command.insert(dot_index, "--build-arg")
-                dot_index += 2
+                command.insert(ctx_index, f"{key}={value}")
+                command.insert(ctx_index, "--build-arg")
+                ctx_index += 2
         return command
 
     if _host_is_arm64():
@@ -1550,8 +1562,9 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[st
                 "--platform", CONTAINER_PLATFORM,
                 "--provenance=false",
                 "--sbom=false",
+                "-f", dockerfile,
                 "-t", local_tag,
-                ".",
+                build_context,
             ]),
             "Building Docker Image",
         ):
@@ -1575,9 +1588,10 @@ def build_and_push_arm64_image(local_tag: str, ecr_uri: str, build_args: dict[st
             "--platform", CONTAINER_PLATFORM,
             "--provenance=false",
             "--sbom=false",
+            "-f", dockerfile,
             "-t", ecr_uri,
             "--push",
-            ".",
+            build_context,
         ]),
         "Building and Pushing Docker Image (ARM64 cross-build)",
     )
