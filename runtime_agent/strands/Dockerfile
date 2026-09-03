@@ -43,8 +43,10 @@ COPY graph/lib/ graph/lib/
 
 # Skills that use docx-js / pptxgenjs via bash/node (local install for require())
 # pptx skill also uses react-icons + sharp for icon rasterization
-RUN npm install docx pptxgenjs react react-dom react-icons sharp
+# mcp-server-fetch-typescript: preinstall so web_fetch MCP skips npx/npm cold start
+RUN npm install docx pptxgenjs react react-dom react-icons sharp mcp-server-fetch-typescript
 ENV NODE_PATH=/app/node_modules
+ENV PATH="/app/node_modules/.bin:${PATH}"
 
 # OpenTelemetry (ADOT + Strands telemetry for AgentCore Evaluations)
 RUN pip install aws-opentelemetry-distro>=0.10.0
