@@ -272,9 +272,15 @@ def update_tools(strands_tools: list, mcp_servers: list):
         tools.append(tool_item)
         known_names.add(name)
 
-    # MCP tools
+    # MCP tools — persistent stack is already running; list_tools reuses it.
     for mcp_tool in mcp_servers:
         logger.info(f"Processing MCP tool: {mcp_tool}")
+        if mcp_manager.is_client_failed(mcp_tool):
+            logger.warning(
+                "Skipping list_tools for MCP client that failed to start: %s",
+                mcp_tool,
+            )
+            continue
         try:
             with mcp_manager.get_active_clients([mcp_tool]) as _:
                 client = mcp_manager.get_client(mcp_tool)
@@ -358,6 +364,8 @@ def append_tool_guidance_to_prompt(system_prompt: str, mcp_servers: list) -> str
 def create_agent(strands_tools: list[str], mcp_servers: list[str], skill_list: list[str]):
     """Create Agent with Strands AgentSkills plugin for selected skills."""
     init_mcp_clients(mcp_servers)
+    # Start persistent sessions once, then list_tools reuses them (no double spawn).
+    mcp_manager.start_agent_clients(mcp_servers)
 
     tools = update_tools(strands_tools, mcp_servers)
 
@@ -576,9 +584,7 @@ def _refresh_agent_if_needed(
 
     mcp_manager.stop_agent_clients()
     agent = create_agent(strands_tools, mcp_servers, skill_list)
-
-    # Start or reuse persistent MCP clients for the refreshed agent.
-    mcp_manager.start_agent_clients(mcp_servers)
+    # create_agent already started persistent MCP clients before list_tools.
 
 
 def _extract_result_text(final) -> str:

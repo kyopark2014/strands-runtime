@@ -2,6 +2,7 @@ FROM --platform=linux/arm64 python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
  curl \
+ git \
  gnupg \
  build-essential \
  python3-dev \
@@ -36,6 +37,8 @@ RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
 RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
 RUN pip install colorama rich defusedxml lxml "markitdown[pptx]" python-pptx pdf2image pytesseract
 RUN pip install python-dotenv
+# Preinstall so aws documentation MCP skips uvx/PyPI cold start (see mcp_config.py)
+RUN pip install awslabs.aws-documentation-mcp-server
 
 # Strands runtime + graph embedding lib (hybrid wiki search on AgentCore)
 COPY runtime_agent/strands/ .

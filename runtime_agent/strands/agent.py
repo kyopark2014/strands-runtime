@@ -193,9 +193,11 @@ async def _run_agent_strands(payload):
         strands_agent.agent = strands_agent.create_agent(
             strands_tools, mcp_servers, skill_list
         )
+        # create_agent starts persistent MCP once; list_tools reuses that stack.
+    else:
+        # Warm path: revive dead sessions or no-op when already running.
         strands_agent.mcp_manager.start_agent_clients(mcp_servers)
 
-    strands_agent.mcp_manager.start_agent_clients(mcp_servers)
     strands_agent.maybe_sanitize_agent_history_for_model()
 
     message_content = query or ""
