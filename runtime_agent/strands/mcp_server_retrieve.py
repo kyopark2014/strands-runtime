@@ -15,7 +15,7 @@ if _spec is None or _spec.loader is None:
 _mcp_retrieve = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mcp_retrieve)
 
-from mcp.server.fastmcp import FastMCP 
+from mcp.server.mcpserver import MCPServer 
 
 logging.basicConfig(
     level=logging.INFO,  # Default to INFO level
@@ -30,7 +30,7 @@ _RETRIEVE_MAX_ATTEMPTS = 3
 _RETRIEVE_RETRY_BASE_DELAY_SECONDS = 0.5
 
 try:
-    mcp = FastMCP(
+    mcp = MCPServer(
         name = "mcp-retrieve",
         instructions=(
             "You are a helpful assistant. "

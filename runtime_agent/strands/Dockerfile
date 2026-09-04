@@ -1,35 +1,35 @@
 FROM --platform=linux/arm64 python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    gnupg \
-    build-essential \
-    python3-dev \
-    nodejs \
-    npm \
-    pandoc \
-    poppler-utils \
-    libreoffice-writer \
-    libreoffice-calc \
-    libreoffice-impress \
-    fonts-liberation \
-    # Hangul glyphs for matplotlib / ReportLab in execute_code
-    fonts-nanum \
-    fontconfig \
-    tesseract-ocr \
-    && fc-cache -f \
-    && rm -rf /var/lib/apt/lists/*
+ curl \
+ gnupg \
+ build-essential \
+ python3-dev \
+ nodejs \
+ npm \
+ pandoc \
+ poppler-utils \
+ libreoffice-writer \
+ libreoffice-calc \
+ libreoffice-impress \
+ fonts-liberation \
+ # Hangul glyphs for matplotlib / ReportLab in execute_code
+ fonts-nanum \
+ fontconfig \
+ tesseract-ocr \
+ && fc-cache -f \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 RUN pip install --upgrade "setuptools>=83.0.0" \
-    && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
-# Keep FastMCP (mcp.server.fastmcp). mcp 2.x removed it; pin 1.x for stdio MCP servers.
-RUN pip install "mcp>=1.9.0,<2"
-RUN pip install "strands-agents[openai,otel]>=1.44.0" "strands-agents-tools>=0.8.1"
+ && pip install "urllib3>=2.7.0" boto3 botocore --upgrade
+# MCP 2.x MCPServer (mcp.server.mcpserver).
+RUN pip install "mcp>=2.1.1"
+RUN pip install "strands-agents[openai,otel] @ git+https://github.com/strands-agents/sdk-python.git@main#subdirectory=strands-py" "strands-agents-tools>=0.8.1"
 # CVE-2026-16796 fixed in bedrock-agentcore>=1.18.1
 RUN pip install "bedrock-agentcore>=1.18.1" uv
-RUN pip install "mcp>=1.9.0,<2"
+RUN pip install "mcp>=2.1.1"
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install networkx
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
@@ -52,7 +52,7 @@ ENV PATH="/app/node_modules/.bin:${PATH}"
 RUN pip install aws-opentelemetry-distro>=0.10.0
 
 RUN useradd --create-home --uid 10001 --shell /usr/sbin/nologin appuser \
-    && chown -R appuser:appuser /app
+ && chown -R appuser:appuser /app
 
 USER appuser
 
@@ -71,6 +71,6 @@ EXPOSE 8080
 
 # AgentCore runtimes expose /ping for health probes.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \
-  CMD curl --fail http://localhost:8080/ping || exit 1
+ CMD curl --fail http://localhost:8080/ping || exit 1
 
 CMD ["uv", "run", "opentelemetry-instrument", "uvicorn", "agent:app", "--host", "0.0.0.0", "--port", "8080"]

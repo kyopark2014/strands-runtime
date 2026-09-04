@@ -6,7 +6,7 @@ import logging
 import sys
 from typing import Optional
 
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import Field
 
 import image_generation_service as image_svc
@@ -26,7 +26,7 @@ except Exception as e:
     raise
 
 try:
-    mcp = FastMCP(
+    mcp = MCPServer(
         name="image_generation",
         instructions=(
             "You are a helpful assistant that generates images using Stable Diffusion 3.5 Large. "

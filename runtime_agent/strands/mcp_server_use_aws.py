@@ -5,7 +5,7 @@ import sys
 from typing import Any, Dict, Optional
 
 from colorama import Fore, Style
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from rich.panel import Panel
 
 import use_aws as aws_utils
@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger("mcp-server-aws-cost")
 
 try:
-    mcp = FastMCP(
+    mcp = MCPServer(
         name="tools",
         instructions=(
             "You are a helpful assistant. "
