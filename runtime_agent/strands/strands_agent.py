@@ -63,6 +63,8 @@ logger = logging.getLogger("strands-agent")
 
 strands_tools = []
 mcp_servers = []
+# tool_name -> MCP server display name (for UI labels like "Tools: X (websearch)")
+mcp_tool_servers: dict[str, str] = {}
 
 memory_id = actor_id = session_id = namespace = None
 
@@ -232,7 +234,52 @@ def _tool_name(tool_item) -> str:
     return tool_item.tool_name if hasattr(tool_item, "tool_name") else str(tool_item)
 
 
+def resolve_mcp_server(tool_name: str) -> str | None:
+    """Return MCP server label for a tool, if known.
+
+    Prefer the mapping built in update_tools(); fall back to gateway-style
+    ``server___ToolName`` prefixes used by some AgentCore MCP gateways.
+    """
+    if not tool_name:
+        return None
+    mapped = mcp_tool_servers.get(tool_name)
+    if mapped:
+        return mapped
+    if "___" in tool_name:
+        prefix = tool_name.split("___", 1)[0].strip()
+        return prefix or None
+    return None
+
+
+def skill_name_from_tool(tool_name: str, tool_input) -> str | None:
+    """Extract skill name for UI labels from skill loader tools."""
+    if tool_name not in ("skills", "get_skill_instructions"):
+        return None
+    if not isinstance(tool_input, dict):
+        return None
+    skill_name = tool_input.get("skill_name")
+    if isinstance(skill_name, str) and skill_name.strip():
+        return skill_name.strip()
+    return None
+
+
+def tool_label_fields(tool_name: str, tool_input=None) -> dict[str, str]:
+    """Build mcpServer / skillName fields for SSE tool events."""
+    fields: dict[str, str] = {}
+    mcp_server = resolve_mcp_server(tool_name)
+    if mcp_server:
+        fields["mcpServer"] = mcp_server
+    skill_name = skill_name_from_tool(tool_name, tool_input)
+    if skill_name:
+        fields["skillName"] = skill_name
+    return fields
+
+
 def update_tools(strands_tools: list, mcp_servers: list):
+    global mcp_tool_servers
+    # Reset server mapping whenever tools are rebuilt.
+    mcp_tool_servers = {}
+
     # builtin tools
     tools = get_builtin_tools()
     # O(1) membership checks instead of scanning the tools list on every add.
@@ -300,7 +347,10 @@ def update_tools(strands_tools: list, mcp_servers: list):
 
                                 tools.append(mcp_server_item)
                                 known_names.add(name)
-                                logger.info(f"Successfully added {name} from {mcp_tool} server")
+                                mcp_tool_servers[name] = mcp_tool
+                                logger.info(
+                                    f"Successfully added {name} from {mcp_tool} server"
+                                )
                     except Exception as tool_error:
                         logger.error(f"Error listing tools for {mcp_tool}: {tool_error}")
                         continue
@@ -615,7 +665,13 @@ def _publish_cloudwatch_token_metrics(final) -> None:
         logger.warning(f"CloudWatch token metrics publish skipped: {metric_err}")
 
 
-def _collect_tool_result_artifacts(message: dict, queue, references: list, image_url: list) -> None:
+def _collect_tool_result_artifacts(
+    message: dict,
+    queue,
+    references: list,
+    image_url: list,
+    tool_inputs: dict | None = None,
+) -> None:
     if "content" not in message:
         return
 
@@ -631,7 +687,15 @@ def _collect_tool_result_artifacts(message: dict, queue, references: list, image
         toolResultText = toolContent[0].get("text", "")
         tool_name = queue.get_tool_name(toolUseId)
         logger.info(f"[toolResult] {toolResultText}, [toolUseId] {toolUseId}")
-        queue.notify(f"Tool Result: {str(toolResultText)}")
+        label_fields = tool_label_fields(
+            tool_name, (tool_inputs or {}).get(toolUseId)
+        )
+        queue.tool_update(
+            f"{toolUseId}:result",
+            f"Tool Result: {str(toolResultText)}",
+            mcp_server=label_fields.get("mcpServer"),
+            skill_name=label_fields.get("skillName"),
+        )
 
         info_content, urls, refs = chat.get_tool_info(tool_name, toolResultText)
         if refs:
@@ -657,6 +721,7 @@ async def _process_agent_stream(
 ) -> str:
     """Consume the agent event stream and publish the final result to the queue."""
     final_result = current = ""
+    tool_inputs: dict[str, object] = {}
     try:
         with mcp_manager.get_active_clients(mcp_servers) as _:
             agent_stream = agent.stream_async(query)
@@ -686,17 +751,26 @@ async def _process_agent_stream(
                     logger.info(f"[current_tool_use] {text}")
 
                     queue.register_tool(toolUseId, name)
-                    queue.tool_update(toolUseId, f"Tool: {name}, Input: {input_val}")
+                    if isinstance(input_val, dict):
+                        tool_inputs[toolUseId] = input_val
+                    label_fields = tool_label_fields(name, input_val)
+                    queue.tool_update(
+                        f"{toolUseId}:input",
+                        f"Tool: {name}, Input: {input_val}",
+                        mcp_server=label_fields.get("mcpServer"),
+                        skill_name=label_fields.get("skillName"),
+                    )
                     current = ""
 
                 elif "message" in event:
                     message = event["message"]
                     logger.info(f"[message] {message}")
-                    _collect_tool_result_artifacts(message, queue, references, image_url)
+                    _collect_tool_result_artifacts(
+                        message, queue, references, image_url, tool_inputs
+                    )
 
                 elif "contentBlockDelta" or "contentBlockStop" or "messageStop" or "metadata" in event:
                     pass
-
                 else:
                     logger.info(f"event: {event}")
 

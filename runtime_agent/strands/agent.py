@@ -230,6 +230,7 @@ async def _run_agent_strands(payload):
     streamed_text = ""
     image_urls: list = []
     tool_names: dict[str, str] = {}
+    tool_inputs: dict[str, object] = {}
     stop_reason: str | None = None
 
     with strands_agent.mcp_manager.get_active_clients(mcp_servers) as _:
@@ -283,7 +284,15 @@ async def _run_agent_strands(payload):
 
                     if tool_use_id:
                         tool_names[tool_use_id] = name
-                    yield {"tool": name, "input": input_val, "toolUseId": tool_use_id}
+                        if isinstance(input_val, dict):
+                            tool_inputs[tool_use_id] = input_val
+                    payload = {
+                        "tool": name,
+                        "input": input_val,
+                        "toolUseId": tool_use_id,
+                    }
+                    payload.update(strands_agent.tool_label_fields(name, input_val))
+                    yield payload
 
                 elif "message" in event:
                     message = event["message"]
@@ -300,7 +309,17 @@ async def _run_agent_strands(payload):
                         tool_name = tool_names.get(tool_use_id, "")
                         logger.info(f"[toolResult] {tool_result_text}, [toolUseId] {tool_use_id}")
 
-                        yield {"toolResult": tool_result_text, "toolUseId": tool_use_id}
+                        tool_result_payload = {
+                            "toolResult": tool_result_text,
+                            "toolUseId": tool_use_id,
+                            "tool": tool_name,
+                        }
+                        tool_result_payload.update(
+                            strands_agent.tool_label_fields(
+                                tool_name, tool_inputs.get(tool_use_id)
+                            )
+                        )
+                        yield tool_result_payload
 
                         _, urls, _ = chat.get_tool_info(tool_name, tool_result_text)
                         if urls:
@@ -312,7 +331,6 @@ async def _run_agent_strands(payload):
                     pass
                 else:
                     logger.info(f"event: {event}")
-
             result_text = final_output.get("messages") or streamed_text
 
             if not (result_text or "").strip() and streamed_text.strip():

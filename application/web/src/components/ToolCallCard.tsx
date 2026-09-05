@@ -44,15 +44,26 @@ function formatToolPayload(data: string | undefined): string {
   }
 }
 
-/** Prefer explicit skillName, then fall back to get_skill_instructions input. */
+/** Prefer explicit skillName, then fall back to skills / get_skill_instructions input. */
 function skillNameFromEvent(event: ToolEvent): string | undefined {
   if (event.skillName) return event.skillName;
-  if (event.tool !== "get_skill_instructions") return undefined;
+  if (event.tool !== "skills" && event.tool !== "get_skill_instructions") {
+    return undefined;
+  }
   const input = event.input;
   if (!input || typeof input !== "object" || Array.isArray(input)) return undefined;
   const skillName = (input as Record<string, unknown>)["skill_name"];
   if (typeof skillName === "string" && skillName.trim()) return skillName.trim();
   return undefined;
+}
+
+/** Prefer explicit mcpServer, then fall back to gateway-style `server___Tool` names. */
+function mcpServerFromEvent(event: ToolEvent): string | undefined {
+  if (event.mcpServer) return event.mcpServer;
+  const tool = event.tool;
+  if (!tool || !tool.includes("___")) return undefined;
+  const prefix = tool.split("___")[0]?.trim();
+  return prefix || undefined;
 }
 
 /** `Tools: {name}` or `Tools: {name} ({label})`. */
@@ -80,10 +91,11 @@ function formatToolResultLabel(
 
 export function ToolCallCard({ event }: Props) {
   const skillName = skillNameFromEvent(event);
+  const mcpServer = mcpServerFromEvent(event);
   if (event.type === "tool") {
     return (
       <details className="tool-card">
-        <summary>{formatToolLabel(event.tool, event.mcpServer, skillName)}</summary>
+        <summary>{formatToolLabel(event.tool, mcpServer, skillName)}</summary>
         <pre>{formatToolInput(event.input)}</pre>
       </details>
     );
@@ -92,7 +104,7 @@ export function ToolCallCard({ event }: Props) {
     return (
       <details className="tool-card">
         <summary>
-          {formatToolResultLabel(event.tool, event.mcpServer, skillName)}
+          {formatToolResultLabel(event.tool, mcpServer, skillName)}
         </summary>
         <pre>{formatToolPayload(event.data)}</pre>
       </details>

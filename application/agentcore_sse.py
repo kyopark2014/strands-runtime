@@ -35,9 +35,21 @@ def update_streaming_result(notification_queue, message):
         notification_queue.stream(message)
 
 
-def tool_slot_update(notification_queue, slot_key: str, message: str):
+def tool_slot_update(
+    notification_queue,
+    slot_key: str,
+    message: str,
+    *,
+    mcp_server: str | None = None,
+    skill_name: str | None = None,
+):
     if notification_queue is not None:
-        notification_queue.tool_update(slot_key, message)
+        notification_queue.tool_update(
+            slot_key,
+            message,
+            mcp_server=mcp_server,
+            skill_name=skill_name,
+        )
 
 
 tool_info_list = dict()
@@ -136,18 +148,22 @@ def _process_strands_sse_event(data_json: dict, notification_queue, stream_state
             notification_queue,
             f"{tool_use_id}:input",
             f"Tool: {tool}, Input: {tool_input}",
+            mcp_server=data_json.get("mcpServer"),
+            skill_name=data_json.get("skillName"),
         )
         return
 
     if "toolResult" in data_json:
         tool_result = data_json["toolResult"]
         tool_use_id = data_json["toolUseId"]
-        tool_name = tool_name_list.get(tool_use_id, "")
+        tool_name = tool_name_list.get(tool_use_id, data_json.get("tool", ""))
         logger.info(f"[tool_result] {tool_result}")
         tool_slot_update(
             notification_queue,
             f"{tool_use_id}:result",
             f"Tool Result: {str(tool_result)}",
+            mcp_server=data_json.get("mcpServer"),
+            skill_name=data_json.get("skillName"),
         )
         _collect_tool_result_artifacts(
             tool_name,
