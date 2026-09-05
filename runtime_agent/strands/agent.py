@@ -241,7 +241,7 @@ async def _run_agent_strands(payload):
                 if "data" in event:
                     text = event["data"]
                     streamed_text += text
-                    logger.info(f"[data] {text}")
+                    logger.info(f"[data] {utils.truncate_for_log(text)}")
                     yield {"data": text}
 
                 elif "result" in event:
@@ -253,7 +253,7 @@ async def _run_agent_strands(payload):
                     if message:
                         content = message.get("content", [])
                         text = content[0].get("text", "") if content else ""
-                        logger.info(f"[result] {text}")
+                        logger.info(f"[result] {utils.truncate_for_log(text)}")
                         final_output = {"messages": text, "image_url": image_urls}
 
                     try:
@@ -280,7 +280,10 @@ async def _run_agent_strands(payload):
                     name = current_tool_use.get("name", "")
                     input_val = current_tool_use.get("input", "")
                     tool_use_id = current_tool_use.get("toolUseId", "")
-                    logger.info(f"[current_tool_use] name={name}, input={input_val}")
+                    logger.info(
+                        f"[current_tool_use] name={name}, "
+                        f"input={utils.truncate_for_log(input_val)}"
+                    )
 
                     if tool_use_id:
                         tool_names[tool_use_id] = name
@@ -296,7 +299,7 @@ async def _run_agent_strands(payload):
 
                 elif "message" in event:
                     message = event["message"]
-                    logger.info(f"[message] {message}")
+                    logger.info(f"[message] {utils.truncate_for_log(message)}")
 
                     msg_content = message.get("content", [])
                     for item in msg_content:
@@ -307,10 +310,15 @@ async def _run_agent_strands(payload):
                         tool_content = tool_result["content"]
                         tool_result_text = tool_content[0].get("text", "") if tool_content else ""
                         tool_name = tool_names.get(tool_use_id, "")
-                        logger.info(f"[toolResult] {tool_result_text}, [toolUseId] {tool_use_id}")
+                        # Full text stays in the model transcript; truncate for logs/SSE
+                        # so huge HTML (e.g. get_raw_text) cannot block stdout or flood UI.
+                        logger.info(
+                            f"[toolResult] {utils.truncate_for_log(tool_result_text)}, "
+                            f"[toolUseId] {tool_use_id}, len={len(tool_result_text)}"
+                        )
 
                         tool_result_payload = {
-                            "toolResult": tool_result_text,
+                            "toolResult": utils.truncate_for_stream(tool_result_text),
                             "toolUseId": tool_use_id,
                             "tool": tool_name,
                         }

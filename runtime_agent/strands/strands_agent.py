@@ -676,7 +676,7 @@ def _collect_tool_result_artifacts(
         return
 
     msg_content = message["content"]
-    logger.info(f"tool content: {msg_content}")
+    logger.info(f"tool content: {utils.truncate_for_log(msg_content)}")
     for item in msg_content:
         if "toolResult" not in item:
             continue
@@ -686,13 +686,16 @@ def _collect_tool_result_artifacts(
         toolContent = toolResult["content"]
         toolResultText = toolContent[0].get("text", "")
         tool_name = queue.get_tool_name(toolUseId)
-        logger.info(f"[toolResult] {toolResultText}, [toolUseId] {toolUseId}")
+        logger.info(
+            f"[toolResult] {utils.truncate_for_log(toolResultText)}, "
+            f"[toolUseId] {toolUseId}, len={len(toolResultText)}"
+        )
         label_fields = tool_label_fields(
             tool_name, (tool_inputs or {}).get(toolUseId)
         )
         queue.tool_update(
             f"{toolUseId}:result",
-            f"Tool Result: {str(toolResultText)}",
+            f"Tool Result: {utils.truncate_for_stream(toolResultText)}",
             mcp_server=label_fields.get("mcpServer"),
             skill_name=label_fields.get("skillName"),
         )
@@ -730,7 +733,7 @@ async def _process_agent_stream(
                 text = ""
                 if "data" in event:
                     text = event["data"]
-                    logger.info(f"[data] {text}")
+                    logger.info(f"[data] {utils.truncate_for_log(text)}")
                     current += text
                     queue.stream(current)
 
@@ -738,7 +741,7 @@ async def _process_agent_stream(
                     final = event["result"]
                     final_result = _extract_result_text(final)
                     if final_result:
-                        logger.info(f"[result] {final_result}")
+                        logger.info(f"[result] {utils.truncate_for_log(final_result)}")
                     _publish_cloudwatch_token_metrics(final)
 
                 elif "current_tool_use" in event:
@@ -747,7 +750,7 @@ async def _process_agent_stream(
                     input_val = current_tool_use.get("input", "")
                     toolUseId = current_tool_use.get("toolUseId", "")
 
-                    text = f"name: {name}, input: {input_val}"
+                    text = f"name: {name}, input: {utils.truncate_for_log(input_val)}"
                     logger.info(f"[current_tool_use] {text}")
 
                     queue.register_tool(toolUseId, name)
@@ -756,7 +759,7 @@ async def _process_agent_stream(
                     label_fields = tool_label_fields(name, input_val)
                     queue.tool_update(
                         f"{toolUseId}:input",
-                        f"Tool: {name}, Input: {input_val}",
+                        f"Tool: {name}, Input: {utils.truncate_for_stream(input_val)}",
                         mcp_server=label_fields.get("mcpServer"),
                         skill_name=label_fields.get("skillName"),
                     )
@@ -764,7 +767,7 @@ async def _process_agent_stream(
 
                 elif "message" in event:
                     message = event["message"]
-                    logger.info(f"[message] {message}")
+                    logger.info(f"[message] {utils.truncate_for_log(message)}")
                     _collect_tool_result_artifacts(
                         message, queue, references, image_url, tool_inputs
                     )
