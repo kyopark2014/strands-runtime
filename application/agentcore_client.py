@@ -135,7 +135,6 @@ class AgentCoreService:
         notification_queue,
         stream_state: dict,
     ) -> None:
-        processed_data = set()
         if "text/event-stream" not in response.get("contentType", ""):
             return
 
@@ -149,9 +148,10 @@ class AgentCoreService:
                 continue
 
             data = line[6:].strip()
-            if not data or data in processed_data:
+            # Do not dedupe by payload string: stream text deltas like
+            # {"data": " "} / {"data": "니다."} legitimately repeat in one turn.
+            if not data:
                 continue
-            processed_data.add(data)
 
             try:
                 data_json = json.loads(data)
