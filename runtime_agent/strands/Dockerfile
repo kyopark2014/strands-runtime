@@ -34,7 +34,7 @@ RUN pip install "mcp>=2.1.1"
 RUN pip install Pillow pytz tavily-python requests beautifulsoup4
 RUN pip install networkx
 RUN pip install langchain-aws langchain-core langchain-text-splitters PyPDF2
-RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pyyaml
+RUN pip install python-docx openpyxl reportlab matplotlib pandas finance-datareader pypdf pdfplumber pymupdf pyyaml
 RUN pip install colorama rich defusedxml lxml "markitdown[pptx]" python-pptx pdf2image pytesseract
 RUN pip install python-dotenv
 # Preinstall so aws documentation MCP skips uvx/PyPI cold start (see mcp_config.py)
