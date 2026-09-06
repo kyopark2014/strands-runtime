@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from application.api.routes_auth import require_user_id
 from application import task_store
 from application import utils
+from application.run_state import query_task_run
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -117,3 +118,18 @@ def get_messages(task_id: str, request: Request):
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     return {"messages": task_store.list_messages(task_id, user_id)}
+
+
+@router.get("/{task_id}/run")
+def get_task_run(task_id: str, request: Request):
+    """Query agent run status for refresh recovery (messages + in-process registry).
+
+    Status values: idle | running | pending | done | error | missing
+    source: messages | registry | null
+    When status is done and messages still end on user, hydrates the assistant row.
+    """
+    user_id = require_user_id(request)
+    result = query_task_run(task_id, user_id)
+    if result.get("status") == "missing":
+        raise HTTPException(status_code=404, detail="Task not found")
+    return result

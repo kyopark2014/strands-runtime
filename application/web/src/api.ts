@@ -1,4 +1,4 @@
-import type { AppConfig, Message, StreamEvent, Task } from "./types";
+import type { AppConfig, Message, StreamEvent, Task, TaskRun } from "./types";
 import { uiError, uiLog } from "./debug";
 
 /** Max characters included in SSE token log previews. */
@@ -398,6 +398,7 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: "DELETE" }),
   getMessages: (id: string) =>
     request<{ messages: Message[] }>(`/api/tasks/${id}/messages`),
+  getTaskRun: (id: string) => request<TaskRun>(`/api/tasks/${id}/run`),
   uploadToRag: async (
     file: File,
     options?: { sync?: boolean },
