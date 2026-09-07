@@ -590,6 +590,17 @@ export default function App() {
         files,
       );
     } catch (err) {
+      // Stop aborts the fetch; that path is handled inside sendMessage as stopped.
+      // Do not surface a generic chat banner for abort races.
+      const name = err instanceof Error ? err.name : "";
+      const msg = err instanceof Error ? err.message : String(err);
+      if (
+        name === "AbortError" ||
+        /aborted|abort/i.test(msg)
+      ) {
+        uiLog("chat:send aborted (outer)", { taskId });
+        return;
+      }
       uiError("chat:send failed", err);
       setBootError(CHAT_ERROR_MESSAGE);
     }

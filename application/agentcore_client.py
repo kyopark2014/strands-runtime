@@ -239,13 +239,39 @@ class AgentCoreService:
                 "current": "",
                 "image_url": image_url,
                 "references": references,
+                "cancelled": False,
             }
+            cancel_ids = []
+            if runtime_session_id:
+                cancel_ids.append(runtime_session_id)
             self.process_event_stream(
                 response,
                 notification_queue,
                 stream_state,
-                cancel_ids=[runtime_session_id] if runtime_session_id else [],
+                cancel_ids=cancel_ids,
             )
+
+            from application import run_cancel
+
+            if stream_state.get("cancelled") or (
+                runtime_session_id and run_cancel.is_cancelled(runtime_session_id)
+            ):
+                # Prefer streamed partial text; never keep disconnect noise.
+                partial = (stream_state.get("current") or "").strip()
+                result = partial
+                if run_cancel.is_cancel_noise(stream_state.get("result")):
+                    result = partial
+                elif (stream_state.get("result") or "").strip():
+                    candidate = stream_state["result"]
+                    if isinstance(candidate, str) and not run_cancel.is_cancel_noise(candidate):
+                        result = candidate
+                logger.info(
+                    "AgentCore stream cancelled; returning partial (%s chars)",
+                    len(result or ""),
+                )
+                if notification_queue is not None and result:
+                    notification_queue.result(result)
+                return result or "", stream_state.get("image_url") or []
 
             result = _finalize_agent_result(
                 stream_state["result"],
@@ -260,6 +286,16 @@ class AgentCoreService:
 
         except Exception as exc:
             from botocore.exceptions import ReadTimeoutError
+
+            if runtime_session_id:
+                from application import run_cancel
+
+                if run_cancel.is_cancelled(runtime_session_id):
+                    logger.info(
+                        "AgentCore invoke ended after cancel (%s)",
+                        type(exc).__name__,
+                    )
+                    return "", []
 
             if isinstance(exc, ReadTimeoutError):
                 logger.exception(

@@ -321,21 +321,38 @@ class ChatStreamService:
             )
             if not isinstance(response, str):
                 response = json.dumps(response, ensure_ascii=False)
-            result_holder["content"] = response
-            result_holder["images"] = image_url or []
-            if _is_run_cancelled(result_holder, task_id):
+            cancelled = _is_run_cancelled(result_holder, task_id)
+            if cancelled or run_cancel.is_cancel_noise(response):
                 result_holder["cancelled"] = True
-            run_registry.mark_done(
-                task_id,
-                content=response,
-                images=image_url or [],
-            )
+                # Keep partial only when it is real streamed text, not disconnect noise.
+                result_holder["content"] = (
+                    "" if run_cancel.is_cancel_noise(response) else (response or "")
+                )
+                result_holder["images"] = []
+                run_registry.mark_done(
+                    task_id,
+                    content=result_holder["content"],
+                    images=[],
+                    cancelled=True,
+                )
+            else:
+                result_holder["content"] = response
+                result_holder["images"] = image_url or []
+                run_registry.mark_done(
+                    task_id,
+                    content=response,
+                    images=image_url or [],
+                )
         except Exception:
             logger.exception("Agent run failed")
-            result_holder["error"] = CLIENT_SAFE_AGENT_ERROR
-            if _is_run_cancelled(result_holder, task_id):
+            cancelled = _is_run_cancelled(result_holder, task_id)
+            if cancelled:
                 result_holder["cancelled"] = True
-            run_registry.mark_done(task_id, error=CLIENT_SAFE_AGENT_ERROR)
+                result_holder["content"] = ""
+                run_registry.mark_done(task_id, content="", cancelled=True)
+            else:
+                result_holder["error"] = CLIENT_SAFE_AGENT_ERROR
+                run_registry.mark_done(task_id, error=CLIENT_SAFE_AGENT_ERROR)
         finally:
             message_queue.put(None)
 
@@ -576,6 +593,9 @@ class ChatStreamService:
                     tool_events=tool_events,
                     streamed_text=text,
                 )
+                if run_cancel.is_cancel_noise(final_content):
+                    logger.info("Late persist skipped: cancel/disconnect noise")
+                    return
                 if not (final_content or events):
                     logger.info("Late persist skipped: empty final payload")
                     return
@@ -746,54 +766,17 @@ class ChatStreamService:
                 }
             )
         except GeneratorExit:
-            # Stop calls POST /cancel before abort; refresh only aborts SSE.
-            if _is_run_cancelled(result_holder, task_id):
-                result_holder["cancelled"] = True
-                logger.info(
-                    "SSE disconnected after cancel; skip server persist "
-                    "(client stop message)"
-                )
-                raise
-            # Always persist if DB still ends on user — including the race where
-            # the worker finished (already_final) but add_message never ran.
-            needs_assistant = (
-                bool(task_id and user_id)
-                and self._messages_need_assistant(task_id, user_id)
+            # Abort/Stop on this worker: always signal cancel so AgentCore consume
+            # stops even when POST /cancel landed on another ECS task.
+            if task_id:
+                run_cancel.request_cancel(task_id)
+            for cid in _cancel_ids_from_holder(result_holder, task_id):
+                run_cancel.request_cancel(cid)
+            result_holder["cancelled"] = True
+            logger.info(
+                "SSE disconnected — cancel requested for task=%s; skip server persist",
+                task_id,
             )
-            if not sse_closed_early and needs_assistant:
-                already_final = bool(
-                    (result_holder.get("content") or "").strip()
-                ) or ("error" in result_holder)
-                if already_final:
-                    logger.warning(
-                        "SSE client disconnected after agent finished; "
-                        "persisting assistant immediately"
-                    )
-                    self._persist_assistant_now(
-                        task_id=task_id or "",
-                        user_id=user_id or "",
-                        result_holder=result_holder,
-                        tool_events=tool_events,
-                        streamed_text=streamed_text,
-                        on_assistant_done=on_assistant_done,
-                        on_flush=on_flush,
-                    )
-                else:
-                    logger.warning(
-                        "SSE client disconnected before agent finished; "
-                        "scheduling late persist"
-                    )
-                    self._spawn_late_persist(
-                        message_queue=message_queue,
-                        result_holder=result_holder,
-                        tool_events=tool_events,
-                        tool_meta=tool_meta,
-                        streamed_text=streamed_text,
-                        on_assistant_done=on_assistant_done,
-                        on_flush=on_flush,
-                        task_id=task_id,
-                        user_id=user_id,
-                    )
             raise
         finally:
             if not sse_closed_early:

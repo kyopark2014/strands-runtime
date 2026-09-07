@@ -148,6 +148,8 @@ def _process_strands_sse_event(data_json: dict, notification_queue, stream_state
         final_output = data_json["result"]
         logger.info(f"[result] {_truncate_text(final_output, _LOG_TRUNCATE_CHARS)}")
         if isinstance(final_output, dict):
+            if final_output.get("cancelled"):
+                stream_state["cancelled"] = True
             stream_state["result"] = final_output.get("messages", "")
             if "image_url" in final_output:
                 stream_state["image_url"] = final_output.get("image_url", [])

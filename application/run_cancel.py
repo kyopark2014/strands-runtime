@@ -15,6 +15,17 @@ _lock = threading.Lock()
 _cancelled: dict[str, float] = {}
 _CANCEL_TTL_SECONDS = 3600
 
+# Final texts the runtime may emit when the client disconnects mid-stream.
+# After Stop these must not be persisted as assistant answers.
+_CANCEL_NOISE_MESSAGES = frozenset(
+    {
+        "에이전트 응답 처리 중 오류가 발생했습니다.",
+        "An error occurred processing your request",
+        "An error occurred while processing your request. Please try again.",
+        "Agent processing failed",
+    }
+)
+
 
 def request_cancel(task_id: str) -> None:
     if not task_id:
@@ -52,3 +63,15 @@ def consume_cancelled(task_id: str | None) -> bool:
         if ts is None:
             return False
         return time.monotonic() - ts <= _CANCEL_TTL_SECONDS
+
+
+def is_cancel_noise(text: str | None) -> bool:
+    """True when text is a generic disconnect/failure message after Stop."""
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t in _CANCEL_NOISE_MESSAGES:
+        return True
+    if t.startswith("Error: ") and t[7:].strip() in _CANCEL_NOISE_MESSAGES:
+        return True
+    return False

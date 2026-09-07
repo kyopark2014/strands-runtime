@@ -59,6 +59,7 @@ def mark_done(
     content: str = "",
     images: list[str] | None = None,
     error: str | None = None,
+    cancelled: bool = False,
 ) -> None:
     if not task_id:
         return
@@ -70,10 +71,11 @@ def mark_done(
         }
         prev.update(
             {
-                "status": "error" if error else "done",
-                "content": content or "",
-                "images": list(images or []),
-                "error": error,
+                "status": "error" if error and not cancelled else "done",
+                "content": "" if cancelled else (content or ""),
+                "images": [] if cancelled else list(images or []),
+                "error": None if cancelled else error,
+                "cancelled": bool(cancelled),
                 "finished_at": _now(),
             }
         )

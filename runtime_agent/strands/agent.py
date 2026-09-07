@@ -1,5 +1,6 @@
 import logging
 import sys
+import asyncio
 
 import chat
 try:
@@ -403,12 +404,31 @@ async def _run_agent_strands(payload):
 
             if chat.memory_enabled and not skip_memory:
                 chat.save_to_memory(query, final_output["messages"])
+        except (GeneratorExit, asyncio.CancelledError, BrokenPipeError, ConnectionError) as exc:
+            logger.info(
+                "Agent stream interrupted (%s); treating as cancel partial=%s",
+                type(exc).__name__,
+                len(streamed_text),
+            )
+            final_output = {
+                "messages": streamed_text or "",
+                "image_url": image_urls,
+                "cancelled": True,
+            }
         except Exception:
             logger.exception("Agent stream_async failed")
-            final_output = {
-                "messages": "에이전트 응답 처리 중 오류가 발생했습니다.",
-                "image_url": image_urls,
-            }
+            # If the client already stopped, do not surface a fake failure answer.
+            if cancelled or (cancel_id and run_cancel.is_cancelled(cancel_id)):
+                final_output = {
+                    "messages": streamed_text or "",
+                    "image_url": image_urls,
+                    "cancelled": True,
+                }
+            else:
+                final_output = {
+                    "messages": "에이전트 응답 처리 중 오류가 발생했습니다.",
+                    "image_url": image_urls,
+                }
 
     yield {"result": final_output}
 

@@ -109,11 +109,27 @@ def query_task_run(task_id: str, user_id: str) -> dict[str, Any]:
         }
 
     if reg and reg.get("status") in ("done", "error"):
+        if reg.get("cancelled"):
+            return {
+                "task_id": task_id,
+                "status": "done",
+                "content": "",
+                "images": [],
+                "error": None,
+                "source": "registry",
+                "hydrated": False,
+                "cancelled": True,
+            }
         content = (reg.get("content") or "").strip()
         error = reg.get("error")
         images = list(reg.get("images") or [])
         if error and not content:
             content = f"Error: {error}"
+        # Never hydrate disconnect/cancel noise into the transcript.
+        from application import run_cancel
+
+        if run_cancel.is_cancel_noise(content):
+            content = ""
         hydrated = False
         if content and last_role == "user":
             hydrated = _hydrate_assistant_if_needed(
