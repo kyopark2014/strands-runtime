@@ -134,12 +134,27 @@ class AgentCoreService:
         response,
         notification_queue,
         stream_state: dict,
+        cancel_ids: list[str] | None = None,
     ) -> None:
         if "text/event-stream" not in response.get("contentType", ""):
             return
 
+        cancel_ids = [cid for cid in (cancel_ids or []) if cid]
         # Small chunk size (bytes) keeps SSE lines responsive without large buffering.
         for line in response["response"].iter_lines(chunk_size=10):
+            if cancel_ids:
+                from application import run_cancel
+                if any(run_cancel.is_cancelled(cid) for cid in cancel_ids):
+                    stream_state["cancelled"] = True
+                    logger.info(
+                        "Cancel detected; stopping AgentCore stream consume (%s)",
+                        cancel_ids,
+                    )
+                    try:
+                        response["response"].close()
+                    except Exception:
+                        pass
+                    break
             line = line.decode("utf-8")
             if line:
                 print(f"-> {line}")
@@ -225,7 +240,12 @@ class AgentCoreService:
                 "image_url": image_url,
                 "references": references,
             }
-            self.process_event_stream(response, notification_queue, stream_state)
+            self.process_event_stream(
+                response,
+                notification_queue,
+                stream_state,
+                cancel_ids=[runtime_session_id] if runtime_session_id else [],
+            )
 
             result = _finalize_agent_result(
                 stream_state["result"],

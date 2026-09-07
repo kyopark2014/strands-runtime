@@ -2,6 +2,10 @@ import logging
 import sys
 
 import chat
+try:
+    from application import run_cancel
+except ImportError:
+    import run_cancel
 import httpx
 import boto3
 import utils
@@ -136,6 +140,10 @@ async def _run_agent_strands(payload):
     logger.info(f"skill_list: {skill_list}")
     logger.info(f"runtime_session_id (payload): {runtime_session_id}")
     logger.info(f"runtime_session_id (context): {strands_agent.get_runtime_session_id()}")
+    cancel_id = runtime_session_id or strands_agent.get_runtime_session_id()
+    if cancel_id:
+        run_cancel.clear(cancel_id)
+    cancelled = False
 
     skill_mode = payload.get("skill_mode")
     if skill_mode is None:
@@ -238,6 +246,13 @@ async def _run_agent_strands(payload):
             agent_stream = strands_agent.agent.stream_async(query)
 
             async for event in agent_stream:
+                if cancel_id and run_cancel.is_cancelled(cancel_id):
+                    cancelled = True
+                    logger.info(
+                        "Cancel detected for session %s; stopping strands stream",
+                        cancel_id,
+                    )
+                    break
                 if "data" in event:
                     text = event["data"]
                     streamed_text += text
@@ -339,6 +354,17 @@ async def _run_agent_strands(payload):
                     pass
                 else:
                     logger.info(f"event: {event}")
+
+            if not cancelled and cancel_id and run_cancel.is_cancelled(cancel_id):
+                cancelled = True
+
+            if cancelled:
+                logger.info(
+                    "Run cancelled for session %s; partial result len=%s",
+                    cancel_id,
+                    len(streamed_text),
+                )
+
             result_text = final_output.get("messages") or streamed_text
 
             if not (result_text or "").strip() and streamed_text.strip():
@@ -347,7 +373,9 @@ async def _run_agent_strands(payload):
             # Final stop_reason wins even when earlier turns left preamble text
             # (e.g. "확인해보겠습니다" + tools, then empty refusal).
             skip_memory = False
-            if stop_reason == "content_filtered":
+            if cancelled:
+                skip_memory = True
+            elif stop_reason == "content_filtered":
                 result_text = (
                     "요청이 모델 안전 정책에 의해 차단되었습니다. "
                     "다른 모델로 시도하거나 질문을 바꿔 주세요."
