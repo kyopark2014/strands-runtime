@@ -766,17 +766,54 @@ class ChatStreamService:
                 }
             )
         except GeneratorExit:
-            # Abort/Stop on this worker: always signal cancel so AgentCore consume
-            # stops even when POST /cancel landed on another ECS task.
-            if task_id:
-                run_cancel.request_cancel(task_id)
-            for cid in _cancel_ids_from_holder(result_holder, task_id):
-                run_cancel.request_cancel(cid)
-            result_holder["cancelled"] = True
-            logger.info(
-                "SSE disconnected — cancel requested for task=%s; skip server persist",
-                task_id,
+            # Stop calls POST /cancel before abort; refresh only aborts SSE.
+            if _is_run_cancelled(result_holder, task_id):
+                result_holder["cancelled"] = True
+                logger.info(
+                    "SSE disconnected after cancel; skip server persist "
+                    "(client stop message)"
+                )
+                raise
+            # Always persist if DB still ends on user — including the race where
+            # the worker finished (already_final) but add_message never ran.
+            needs_assistant = (
+                bool(task_id and user_id)
+                and self._messages_need_assistant(task_id, user_id)
             )
+            if not sse_closed_early and needs_assistant:
+                already_final = bool(
+                    (result_holder.get("content") or "").strip()
+                ) or ("error" in result_holder)
+                if already_final:
+                    logger.warning(
+                        "SSE client disconnected after agent finished; "
+                        "persisting assistant immediately"
+                    )
+                    self._persist_assistant_now(
+                        task_id=task_id or "",
+                        user_id=user_id or "",
+                        result_holder=result_holder,
+                        tool_events=tool_events,
+                        streamed_text=streamed_text,
+                        on_assistant_done=on_assistant_done,
+                        on_flush=on_flush,
+                    )
+                else:
+                    logger.warning(
+                        "SSE client disconnected before agent finished; "
+                        "scheduling late persist"
+                    )
+                    self._spawn_late_persist(
+                        message_queue=message_queue,
+                        result_holder=result_holder,
+                        tool_events=tool_events,
+                        tool_meta=tool_meta,
+                        streamed_text=streamed_text,
+                        on_assistant_done=on_assistant_done,
+                        on_flush=on_flush,
+                        task_id=task_id,
+                        user_id=user_id,
+                    )
             raise
         finally:
             if not sse_closed_early:
